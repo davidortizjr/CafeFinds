@@ -1,4 +1,4 @@
-# Cupboard — a coffee shop log
+# CafeFinds — a coffee shop log
 
 A minimal, mobile-first "Letterboxd for coffee shops": browse a map of nearby
 cafes (Google Places), check them off once you've been, and leave a rating +
@@ -13,50 +13,7 @@ iPhone Home Screen as a PWA — no App Store needed.
 - **Database**: Prisma ORM → Neon serverless Postgres
 - **Identity**: anonymous per-device id (no login yet — see "Auth" below)
 
-## 1. Set up Neon
-
-1. Create a project at [neon.tech](https://neon.tech).
-2. In the project's **Connect** panel, copy two connection strings:
-   - the **pooled** one (has `-pooler` in the host) → `DATABASE_URL`
-   - the **direct** one → `DIRECT_URL` (used only for migrations)
-3. Copy `.env.example` to `.env` and paste both in.
-
-## 2. Set up Google Maps
-
-1. In [Google Cloud Console](https://console.cloud.google.com/), enable **Maps
-   JavaScript API** and **Places API** on a project.
-2. Create an API key, then restrict it (Application restrictions → HTTP
-   referrers) to `localhost:5173/*` for dev and your production domain once
-   deployed.
-3. Put the key in `.env` as `VITE_GOOGLE_MAPS_API_KEY`.
-
-## 3. Install & run locally
-
-```bash
-npm install
-npx prisma migrate dev --name init   # creates tables in Neon
-npm run dev:server                   # Express API on :3001 (separate terminal)
-npm run dev                          # Vite dev server on :5173, proxies /api
-```
-
-Open `http://localhost:5173` on your phone (same network) or in a mobile
-device emulator — the whole UI is designed around a phone-width viewport.
-
-## 4. Deploy to Vercel
-
-1. Push this repo to GitHub and import it in Vercel.
-2. In **Project Settings → Environment Variables**, add `DATABASE_URL`,
-   `DIRECT_URL`, and `VITE_GOOGLE_MAPS_API_KEY`.
-3. Deploy. `vercel.json` is already configured to build the Vite frontend to
-   `dist/` and route all `/api/*` traffic to the single Express function in
-   `api/index.js`.
-4. Run `npx prisma migrate deploy` once (locally, pointed at your Neon
-   `DIRECT_URL`) to create tables in the production database — Vercel builds
-   don't run migrations automatically.
-5. Add your Vercel domain to the Google Maps API key's HTTP referrer
-   restrictions.
-
-## 5. Add it to an iPhone Home Screen
+## Add it to an iPhone Home Screen
 
 Since this isn't on the App Store yet, it installs straight from Safari as a
 standalone PWA:
