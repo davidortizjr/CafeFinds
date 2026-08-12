@@ -47,13 +47,13 @@ export default function ProfilePage() {
 
       {!installed && (
         <div className="install-card">
-          <h3>Add Cupboard to your Home Screen</h3>
+          <h3>Add CaféFinds to your Home Screen</h3>
           <p>The app isn't in the App Store yet — install it straight from Safari instead. It'll open full-screen, just like a native app.</p>
           <div className="steps">
             <div><span className="k">1</span>Open this page in Safari on your iPhone.</div>
             <div><span className="k">2</span>Tap the Share icon in the toolbar.</div>
             <div><span className="k">3</span>Scroll down and tap "Add to Home Screen".</div>
-            <div><span className="k">4</span>Tap "Add" — Cupboard now lives on your Home Screen.</div>
+            <div><span className="k">4</span>Tap "Add" — CaféFinds now lives on your Home Screen.</div>
           </div>
         </div>
       )}

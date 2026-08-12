@@ -9,8 +9,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icons/apple-touch-icon.png'],
       manifest: {
-        name: 'Cupboard — a coffee shop log',
-        short_name: 'Cupboard',
+        name: 'CaféFinds — a coffee shop log',
+        short_name: 'CaféFinds',
         description: 'Track the coffee shops you have been to, rate them, and find the next one on the map.',
         theme_color: '#1F1B16',
         background_color: '#F7F3EC',

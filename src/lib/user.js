@@ -1,4 +1,4 @@
-const KEY = 'cupboard:deviceId'
+const KEY = 'caféfinds:deviceId'
 
 // No sign-up flow yet — each device gets a stable anonymous id so reviews
 // and the visited checklist persist across sessions. Swap this out for real

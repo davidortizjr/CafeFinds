@@ -1,4 +1,4 @@
-// Prisma schema for Cupboard — a coffee-shop log
+// Prisma schema for Caféfinds — a coffee-shop log
 // Datasource is Neon (serverless Postgres). See README for setup.
 
 generator client {
