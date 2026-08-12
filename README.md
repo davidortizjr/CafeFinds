@@ -1,4 +1,4 @@
-# Cupboard — a coffee shop log
+# CafeFinds — a coffee shop log
 
 A minimal, mobile-first "Letterboxd for coffee shops": browse a map of nearby
 cafes (Google Places), check them off once you've been, and leave a rating +
