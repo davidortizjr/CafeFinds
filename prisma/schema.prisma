@@ -1,0 +1,65 @@
+// Prisma schema for Cupboard — a coffee-shop log
+// Datasource is Neon (serverless Postgres). See README for setup.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  deviceId  String   @unique // anonymous id generated on-device, see src/lib/user.js
+  name      String   @default("You")
+  createdAt DateTime @default(now())
+
+  reviews Review[]
+  visits  Visit[]
+}
+
+model Cafe {
+  id        String   @id @default(cuid())
+  placeId   String   @unique // Google Places place_id
+  name      String
+  address   String?
+  lat       Float
+  lng       Float
+  createdAt DateTime @default(now())
+
+  reviews Review[]
+  visits  Visit[]
+
+  @@index([lat, lng])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  rating    Int // 1-5
+  text      String?
+  createdAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  cafe   Cafe   @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+  cafeId String
+
+  @@unique([userId, cafeId]) // one review per user per cafe, editable
+  @@index([cafeId])
+}
+
+model Visit {
+  id        String   @id @default(cuid())
+  visitedAt DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  cafe   Cafe   @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+  cafeId String
+
+  @@unique([userId, cafeId]) // the "checklist" toggle — present = visited
+  @@index([cafeId])
+}
