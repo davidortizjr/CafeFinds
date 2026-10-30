@@ -1,7 +1,10 @@
 import { Router } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { requireAuth } from '../lib/auth.js'
 
 const router = Router()
+
+router.use(requireAuth)
 
 // The "Letterboxd diary" view: every cafe the current user has checked off,
 // newest first, with their own review if they left one.

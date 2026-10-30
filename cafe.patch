@@ -1,0 +1,6003 @@
+From eb1fe8f2e4ab7bfe7f1954f4e957c4b842cf08ce Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 30 Oct 2026 15:14:43 +0800
+Subject: [PATCH] Add accounts, profiles and settings, and redesign the UI
+
+Accounts
+- Register, sign in/out, forgot and reset password (single-use, 1-hour,
+  hashed token; identical response whether or not the email exists)
+- Session in an httpOnly SameSite=Lax cookie; tokenVersion signs out other
+  devices on password change/reset; auth routes rate limited
+- Public profiles at /u/:username; settings for name, username, bio, email
+  (needs current password), password, and account deletion
+- Anonymous device-id users are kept; registering from the same device
+  claims their old visits and reviews
+
+Access rules
+- Guests can browse the map, open cafes and read logs
+- Visiting, rating and the log page require sign-in, enforced on the server
+- Cafe rows are only created by signed-in users and never overwritten from
+  client input, so browsing no longer writes to the database
+
+Design
+- New look: ceramic ground, one variable typeface (Bricolage Grotesque),
+  cherry actions, leaf-green visited state, coffee-bean ratings
+- Floating dock with sliding indicator, spring bottom sheet with swipe to
+  dismiss, bean roll-in and stamp-press on user actions, steaming cup on
+  account screens; all motion respects prefers-reduced-motion
+
+Also: SPA fallback rewrite in vercel.json so emailed reset links open on a
+cold load; migration 20261030090000_accounts; README and .env.example updated.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QuTAcwHESzkHN3RYyEZvpT
+---
+ .env.example                                  |   16 +
+ README.md                                     |  108 +-
+ index.html                                    |    6 +-
+ package-lock.json                             |  156 +-
+ package.json                                  |    5 +-
+ .../20261030090000_accounts/migration.sql     |   38 +
+ prisma/schema.prisma                          |   35 +-
+ server/index.js                               |   51 +-
+ server/lib/auth.js                            |  102 +
+ server/lib/mail.js                            |   46 +
+ server/lib/validate.js                        |   44 +
+ server/routes/auth.js                         |  164 ++
+ server/routes/cafes.js                        |   78 +-
+ server/routes/log.js                          |    3 +
+ server/routes/me.js                           |   99 +
+ server/routes/reviews.js                      |   15 +-
+ server/routes/users.js                        |   43 +
+ server/routes/visits.js                       |    3 +
+ src/App.jsx                                   |   84 +-
+ src/components/AuthShell.jsx                  |   40 +
+ src/components/Avatar.jsx                     |   15 +
+ src/components/BeanRating.jsx                 |   76 +
+ src/components/BottomNav.jsx                  |   52 -
+ src/components/CafeSheet.jsx                  |  286 ++-
+ src/components/CountUp.jsx                    |    7 +
+ src/components/Dock.jsx                       |   42 +
+ src/components/Field.jsx                      |   45 +
+ src/components/MapView.jsx                    |   44 +-
+ src/components/RouteGuards.jsx                |   41 +
+ src/components/SearchBar.jsx                  |   20 +-
+ src/components/StampBadge.jsx                 |   23 +-
+ src/components/StarRating.jsx                 |   38 -
+ src/components/Stats.jsx                      |   18 +
+ src/components/icons.jsx                      |   85 +
+ src/index.css                                 | 1653 +++++++++++++----
+ src/lib/api.js                                |   82 +-
+ src/lib/auth.jsx                              |   49 +
+ src/lib/format.js                             |   41 +
+ src/lib/motion.js                             |   30 +
+ src/lib/user.js                               |   28 +-
+ src/pages/ForgotPasswordPage.jsx              |   72 +
+ src/pages/LogPage.jsx                         |  115 +-
+ src/pages/LoginPage.jsx                       |   84 +
+ src/pages/MapPage.jsx                         |  112 +-
+ src/pages/ProfilePage.jsx                     |  155 +-
+ src/pages/RegisterPage.jsx                    |  102 +
+ src/pages/ResetPasswordPage.jsx               |   80 +
+ src/pages/SettingsPage.jsx                    |  366 ++++
+ vercel.json                                   |    3 +-
+ vite.config.js                                |    4 +-
+ 50 files changed, 4023 insertions(+), 881 deletions(-)
+ create mode 100644 prisma/migrations/20261030090000_accounts/migration.sql
+ create mode 100644 server/lib/auth.js
+ create mode 100644 server/lib/mail.js
+ create mode 100644 server/lib/validate.js
+ create mode 100644 server/routes/auth.js
+ create mode 100644 server/routes/me.js
+ create mode 100644 server/routes/users.js
+ create mode 100644 src/components/AuthShell.jsx
+ create mode 100644 src/components/Avatar.jsx
+ create mode 100644 src/components/BeanRating.jsx
+ delete mode 100644 src/components/BottomNav.jsx
+ create mode 100644 src/components/CountUp.jsx
+ create mode 100644 src/components/Dock.jsx
+ create mode 100644 src/components/Field.jsx
+ create mode 100644 src/components/RouteGuards.jsx
+ delete mode 100644 src/components/StarRating.jsx
+ create mode 100644 src/components/Stats.jsx
+ create mode 100644 src/components/icons.jsx
+ create mode 100644 src/lib/auth.jsx
+ create mode 100644 src/lib/format.js
+ create mode 100644 src/lib/motion.js
+ create mode 100644 src/pages/ForgotPasswordPage.jsx
+ create mode 100644 src/pages/LoginPage.jsx
+ create mode 100644 src/pages/RegisterPage.jsx
+ create mode 100644 src/pages/ResetPasswordPage.jsx
+ create mode 100644 src/pages/SettingsPage.jsx
+
+diff --git a/.env.example b/.env.example
+index 3b053d6..12f4de0 100644
+--- a/.env.example
++++ b/.env.example
+@@ -9,3 +9,19 @@ DIRECT_URL="postgresql://user:password@ep-xxxx.region.aws.neon.tech/cupboard?ssl
+ # "Places API" enabled. VITE_ prefix exposes it to the client — that is
+ # expected for the Maps JS API, security comes from the referrer restriction.
+ VITE_GOOGLE_MAPS_API_KEY="your-google-maps-api-key"
++
++# Signs the session cookie. REQUIRED in production (the API refuses to start
++# sessions without it). Generate one with: openssl rand -base64 48
++# Changing it signs everyone out.
++JWT_SECRET="replace-with-a-long-random-string"
++
++# Public address of the app, used to build the link in password-reset emails.
++# On Vercel this falls back to the production domain automatically.
++APP_URL="http://localhost:5173"
++
++# Password-reset email, sent through Resend (https://resend.com).
++# Without RESEND_API_KEY, local development prints the reset link to the
++# server console instead, and production sends nothing.
++RESEND_API_KEY=""
++# Must be an address on a domain you've verified in Resend.
++EMAIL_FROM="CaféFinds <hello@yourdomain.com>"
+diff --git a/README.md b/README.md
+index 2db824d..8e5e3ca 100644
+--- a/README.md
++++ b/README.md
+@@ -1,59 +1,93 @@
+ # CafeFinds — a coffee shop log
+ 
+-A minimal, mobile-first "Letterboxd for coffee shops": browse a map of nearby
+-cafes (Google Places), check them off once you've been, and leave a rating +
+-note. Built React + Vite, Express, Prisma, Neon Postgres. Installable to an
+-iPhone Home Screen as a PWA — no App Store needed.
++A mobile-first "Letterboxd for coffee shops": browse a map of nearby cafés
++(Google Places), mark the ones you've been to, rate them with coffee beans and
++leave a note. Anyone can browse and read logs; you need an account to log a
++café. Built with React + Vite, Express, Prisma and Neon Postgres, and it
++installs to an iPhone Home Screen as a PWA.
+ 
+ ## Stack
+ 
+ - **Frontend**: React + Vite, React Router, plain CSS (no framework), `vite-plugin-pwa`
++- **Type and motion**: Bricolage Grotesque (one variable family, loaded from Google Fonts); animation is CSS only and respects `prefers-reduced-motion`
+ - **Maps**: Google Maps JavaScript API + Places library (Autocomplete + Nearby Search)
+ - **Backend**: Express, mounted as a single Vercel serverless function in production
+ - **Database**: Prisma ORM → Neon serverless Postgres
+-- **Identity**: anonymous per-device id (no login yet — see "Auth" below)
++- **Accounts**: email or username + password, session in an httpOnly cookie
+ 
+-## Add it to an iPhone Home Screen
++## Setup
++
++```bash
++npm install
++cp .env.example .env      # fill in the values; see the comments in the file
++npx prisma migrate deploy # applies every migration, including accounts
++npm run dev:server        # API on :3001
++npm run dev               # app on :5173 (proxies /api to :3001)
++```
++
++Environment variables (all documented in `.env.example`):
++
++| Variable | Needed for |
++| --- | --- |
++| `DATABASE_URL`, `DIRECT_URL` | Neon Postgres |
++| `VITE_GOOGLE_MAPS_API_KEY` | The map and café search |
++| `JWT_SECRET` | Signing the session cookie. **Required in production**: the API refuses to start sessions without it |
++| `APP_URL` | The link inside password-reset emails (falls back to Vercel's production domain) |
++| `RESEND_API_KEY`, `EMAIL_FROM` | Sending password-reset emails. Without a key, local dev prints the reset link to the server console |
+ 
+-Since this isn't on the App Store yet, it installs straight from Safari as a
+-standalone PWA:
++## Who can do what
+ 
+-1. Open the deployed URL in **Safari** on the iPhone.
+-2. Tap the **Share** icon → **Add to Home Screen** → **Add**.
+-3. It launches full-screen with its own icon, no browser chrome.
++| | Guest | Signed in |
++| --- | --- | --- |
++| Browse the map, search, open a café | ✓ | ✓ |
++| Read café logs and public profiles | ✓ | ✓ |
++| Mark visited, rate, write a log | | ✓ |
++| Your log page, settings | | ✓ |
+ 
+-The app's `Profile` tab shows these same steps until it detects it's already
+-running in standalone mode.
++This is enforced on the server (`requireAuth` on every write route), not just
++hidden in the UI.
++
++## Screens
++
++`/` map · `/log` your diary · `/u/:username` public profile · `/settings`
++profile, email, password, delete account · `/login` · `/register` ·
++`/forgot-password` · `/reset-password`
+ 
+ ## How the pieces fit together
+ 
+-- **Map tab**: nearby cafes come from a Google Places `nearbySearch` re-run
+-  whenever the map goes idle. Tapping a marker (or a search result) calls
+-  `POST /api/cafes/upsert`, which finds-or-creates that cafe in Postgres
+-  keyed on its Google `place_id`, and returns it hydrated with aggregate
+-  rating, everyone else's reviews, and whether *you've* been there.
++- **Sessions**: signing in sets a signed JWT in an httpOnly, `SameSite=Lax`
++  cookie (30 days). `tokenVersion` on the user is bumped on every password
++  change or reset, which signs out every other device.
++- **Map tab**: nearby cafés come from a Google Places `nearbySearch` re-run
++  whenever the map goes idle. Opening a café calls `GET /api/cafes/:placeId`
++  (public). A café only gets a database row when a signed-in person first
++  marks it visited or rates it (`POST /api/cafes/upsert`), so browsing never
++  writes to the database.
+ - **Visited checklist**: `POST /api/visits/toggle` flips a `Visit` row keyed
+-  on `(userId, cafeId)`. Visited cafes get a distinct stamp-colored marker
+-  on the map and a stamp badge everywhere else.
+-- **Reviews**: one review per user per cafe (`POST /api/reviews` upserts).
+-  Saving a review implies a visit, so the checklist and diary stay in sync.
+-- **Log tab**: `GET /api/log` returns every cafe you've checked off, newest
+-  first — the diary view.
++  on `(userId, cafeId)`.
++- **Reviews**: one per user per café (`POST /api/reviews` upserts, rating 1–5,
++  note up to 500 characters). Saving a review implies a visit.
++- **Password reset**: `POST /api/auth/forgot` always answers the same way,
++  whether or not the email has an account. The emailed token is single-use,
++  valid for one hour, and only its SHA-256 hash is stored.
++- **Existing anonymous data**: before accounts, each device had a random id.
++  If a device with one registers, its old visits and reviews move into the new
++  account (see `claimedLegacy` in `server/routes/auth.js`).
+ 
+-## Auth
++## Add it to an iPhone Home Screen
+ 
+-There's no sign-up flow yet. Each device generates a random id on first
+-load (`src/lib/user.js`), stored in `localStorage`, and the server upserts a
+-matching `User` row for it. That's enough for a single-device MVP; when
+-you're ready for real accounts, swap `getDeviceId()` for a real auth
+-provider (Clerk, Auth.js, etc.) and point the `x-device-id` header at the
+-authenticated user's id instead — the Prisma schema doesn't need to change.
++It installs straight from Safari as a standalone PWA: open the deployed URL in
++**Safari**, tap **Share** → **Add to Home Screen** → **Add**. The same steps
++appear in Settings until the app detects it is already running standalone.
+ 
+-## Notes / next steps
++## Known gaps / next steps
+ 
++- **No email verification.** Anyone can register with any address; they just
++  can't read its mail. Add a confirmation email before relying on addresses.
++- **Rate limiting is per serverless instance.** Auth routes allow 20 attempts
++  per 15 minutes per IP, but each instance counts on its own. Put a shared
++  store (e.g. Upstash) or the host's firewall behind it for real traffic.
+ - Marker icons use classic `google.maps.Marker`; migrate to
+-  `AdvancedMarkerElement` + a Map ID if you want custom HTML pins later.
+-- There's no image upload for reviews or cafe photos — Places `photos` data
+-  could be pulled in for that.
+-- No rate limiting on the API routes yet; add it before opening this up
+-  publicly.
++  `AdvancedMarkerElement` + a Map ID for custom HTML pins.
++- No photo upload for avatars, reviews or cafés. Places `photos` could fill in
++  café images.
+diff --git a/index.html b/index.html
+index dc75dc9..e68d80e 100644
+--- a/index.html
++++ b/index.html
+@@ -9,11 +9,11 @@
+     content="Track the coffee shops you've been to, rate them, and find the next one on the map." />
+ 
+   <!-- Theme -->
+-  <meta name="theme-color" content="#1F1B16" />
++  <meta name="theme-color" content="#EBEEE9" />
+ 
+   <!-- iOS "Add to Home Screen" support -->
+   <meta name="apple-mobile-web-app-capable" content="yes" />
+-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
++  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+   <meta name="apple-mobile-web-app-title" content="CaféFinds" />
+   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+ 
+@@ -23,7 +23,7 @@
+   <link rel="preconnect" href="https://fonts.googleapis.com" />
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+   <link
+-    href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
++    href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,200..800&display=swap"
+     rel="stylesheet" />
+ </head>
+ 
+diff --git a/package-lock.json b/package-lock.json
+index 7dd83d4..fb7e6f7 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -11,8 +11,11 @@
+       "dependencies": {
+         "@googlemaps/js-api-loader": "^1.16.8",
+         "@prisma/client": "^5.20.0",
++        "bcryptjs": "^3.0.3",
+         "cors": "^2.8.5",
+         "express": "^4.21.0",
++        "express-rate-limit": "^8.7.2",
++        "jsonwebtoken": "^9.0.3",
+         "react": "^18.3.1",
+         "react-dom": "^18.3.1",
+         "react-router-dom": "^6.26.2",
+@@ -2954,6 +2957,15 @@
+         "node": ">=6.0.0"
+       }
+     },
++    "node_modules/bcryptjs": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/bcryptjs/-/bcryptjs-3.0.3.tgz",
++      "integrity": "sha512-GlF5wPWnSa/X5LKM1o0wz0suXIINz1iHRLvTS+sLyi7XPbe5ycmYI3DlZqVGZZtDgl4DmasFg7gOB3JYbphV5g==",
++      "license": "BSD-3-Clause",
++      "bin": {
++        "bcrypt": "bin/bcrypt"
++      }
++    },
+     "node_modules/body-parser": {
+       "version": "1.20.6",
+       "resolved": "https://registry.npmjs.org/body-parser/-/body-parser-1.20.6.tgz",
+@@ -3040,6 +3052,12 @@
+         "node": "^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7"
+       }
+     },
++    "node_modules/buffer-equal-constant-time": {
++      "version": "1.0.1",
++      "resolved": "https://registry.npmjs.org/buffer-equal-constant-time/-/buffer-equal-constant-time-1.0.1.tgz",
++      "integrity": "sha512-zRpUiDwd/xk6ADqPMATG8vc9VPrkck7T07OIx0gnjmJAnHnTVXNQG3vfvWNuiZIkwu9KrKdA1iJKfsfTVxE6NA==",
++      "license": "BSD-3-Clause"
++    },
+     "node_modules/buffer-from": {
+       "version": "1.1.2",
+       "resolved": "https://registry.npmjs.org/buffer-from/-/buffer-from-1.1.2.tgz",
+@@ -3302,7 +3320,6 @@
+       "version": "4.4.3",
+       "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+       "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "ms": "^2.1.3"
+@@ -3395,6 +3412,15 @@
+         "node": ">= 0.4"
+       }
+     },
++    "node_modules/ecdsa-sig-formatter": {
++      "version": "1.0.11",
++      "resolved": "https://registry.npmjs.org/ecdsa-sig-formatter/-/ecdsa-sig-formatter-1.0.11.tgz",
++      "integrity": "sha512-nagl3RYrbNv6kQkeJIpt6NJZy8twLB/2vtz6yN9Z4vRKHN4/QZJIEbqohALSgwKdnksuY3k5Addp5lg8sVoVcQ==",
++      "license": "Apache-2.0",
++      "dependencies": {
++        "safe-buffer": "^5.0.1"
++      }
++    },
+     "node_modules/ee-first": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/ee-first/-/ee-first-1.1.1.tgz",
+@@ -3728,6 +3754,25 @@
+         "url": "https://opencollective.com/express"
+       }
+     },
++    "node_modules/express-rate-limit": {
++      "version": "8.7.2",
++      "resolved": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-8.7.2.tgz",
++      "integrity": "sha512-U1ScocxDD9WI09LaBVypvNkOtNR5yWAmZLkuKJdAzIchA4YKFYF6GT5IKER7epG58oXtjvGlV0/6ii0F83EyZg==",
++      "license": "MIT",
++      "dependencies": {
++        "debug": "^4.4.3",
++        "ip-address": "^10.2.0"
++      },
++      "engines": {
++        "node": ">= 16"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/express-rate-limit"
++      },
++      "peerDependencies": {
++        "express": ">= 4.11"
++      }
++    },
+     "node_modules/express/node_modules/debug": {
+       "version": "2.6.9",
+       "resolved": "https://registry.npmjs.org/debug/-/debug-2.6.9.tgz",
+@@ -3936,6 +3981,7 @@
+       "version": "2.3.3",
+       "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
++      "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
+       "optional": true,
+@@ -4274,6 +4320,15 @@
+         "node": ">= 0.4"
+       }
+     },
++    "node_modules/ip-address": {
++      "version": "10.7.5",
++      "resolved": "https://registry.npmjs.org/ip-address/-/ip-address-10.7.5.tgz",
++      "integrity": "sha512-t2v0rkILYv9WXmSL7TpAaU3HXgaFYOPUcH3QHgwQ++gpJuH3bqyMy4Fvt/DJCTKwzH3Cf+bAp5W/mFL39KPLzA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 12"
++      }
++    },
+     "node_modules/ipaddr.js": {
+       "version": "1.9.1",
+       "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-1.9.1.tgz",
+@@ -4808,6 +4863,61 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/jsonwebtoken": {
++      "version": "9.0.3",
++      "resolved": "https://registry.npmjs.org/jsonwebtoken/-/jsonwebtoken-9.0.3.tgz",
++      "integrity": "sha512-MT/xP0CrubFRNLNKvxJ2BYfy53Zkm++5bX9dtuPbqAeQpTVe0MQTFhao8+Cp//EmJp244xt6Drw/GVEGCUj40g==",
++      "license": "MIT",
++      "dependencies": {
++        "jws": "^4.0.1",
++        "lodash.includes": "^4.3.0",
++        "lodash.isboolean": "^3.0.3",
++        "lodash.isinteger": "^4.0.4",
++        "lodash.isnumber": "^3.0.3",
++        "lodash.isplainobject": "^4.0.6",
++        "lodash.isstring": "^4.0.1",
++        "lodash.once": "^4.0.0",
++        "ms": "^2.1.1",
++        "semver": "^7.5.4"
++      },
++      "engines": {
++        "node": ">=12",
++        "npm": ">=6"
++      }
++    },
++    "node_modules/jsonwebtoken/node_modules/semver": {
++      "version": "7.8.5",
++      "resolved": "https://registry.npmjs.org/semver/-/semver-7.8.5.tgz",
++      "integrity": "sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==",
++      "license": "ISC",
++      "bin": {
++        "semver": "bin/semver.js"
++      },
++      "engines": {
++        "node": ">=10"
++      }
++    },
++    "node_modules/jwa": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/jwa/-/jwa-2.0.1.tgz",
++      "integrity": "sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==",
++      "license": "MIT",
++      "dependencies": {
++        "buffer-equal-constant-time": "^1.0.1",
++        "ecdsa-sig-formatter": "1.0.11",
++        "safe-buffer": "^5.0.1"
++      }
++    },
++    "node_modules/jws": {
++      "version": "4.0.1",
++      "resolved": "https://registry.npmjs.org/jws/-/jws-4.0.1.tgz",
++      "integrity": "sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==",
++      "license": "MIT",
++      "dependencies": {
++        "jwa": "^2.0.1",
++        "safe-buffer": "^5.0.1"
++      }
++    },
+     "node_modules/leven": {
+       "version": "3.1.0",
+       "resolved": "https://registry.npmjs.org/leven/-/leven-3.1.0.tgz",
+@@ -4825,6 +4935,48 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/lodash.includes": {
++      "version": "4.3.0",
++      "resolved": "https://registry.npmjs.org/lodash.includes/-/lodash.includes-4.3.0.tgz",
++      "integrity": "sha512-W3Bx6mdkRTGtlJISOvVD/lbqjTlPPUDTMnlXZFnVwi9NKJ6tiAk6LVdlhZMm17VZisqhKcgzpO5Wz91PCt5b0w==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isboolean": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/lodash.isboolean/-/lodash.isboolean-3.0.3.tgz",
++      "integrity": "sha512-Bz5mupy2SVbPHURB98VAcw+aHh4vRV5IPNhILUCsOzRmsTmSQ17jIuqopAentWoehktxGd9e/hbIXq980/1QJg==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isinteger": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/lodash.isinteger/-/lodash.isinteger-4.0.4.tgz",
++      "integrity": "sha512-DBwtEWN2caHQ9/imiNeEA5ys1JoRtRfY3d7V9wkqtbycnAmTvRRmbHKDV4a0EYc678/dia0jrte4tjYwVBaZUA==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isnumber": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/lodash.isnumber/-/lodash.isnumber-3.0.3.tgz",
++      "integrity": "sha512-QYqzpfwO3/CWf3XP+Z+tkQsfaLL/EnUlXWVkIk5FUPc4sBdTehEqZONuyRt2P67PXAk+NXmTBcc97zw9t1FQrw==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isplainobject": {
++      "version": "4.0.6",
++      "resolved": "https://registry.npmjs.org/lodash.isplainobject/-/lodash.isplainobject-4.0.6.tgz",
++      "integrity": "sha512-oSXzaWypCMHkPC3NvBEaPHf0KsA5mvPrOPgQWDsbg8n7orZ290M0BmC/jgRZ4vcJ6DTAhjrsSYgdsW/F+MFOBA==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.isstring": {
++      "version": "4.0.1",
++      "resolved": "https://registry.npmjs.org/lodash.isstring/-/lodash.isstring-4.0.1.tgz",
++      "integrity": "sha512-0wJxfxH1wgO3GrbuP+dTTk7op+6L41QCXbGINEmD+ny/G/eCqGzxyCsh7159S+mgDDcoarnBw6PC1PS5+wUGgw==",
++      "license": "MIT"
++    },
++    "node_modules/lodash.once": {
++      "version": "4.1.1",
++      "resolved": "https://registry.npmjs.org/lodash.once/-/lodash.once-4.1.1.tgz",
++      "integrity": "sha512-Sb487aTOCr9drQVL8pIxOzVhafOjZN9UU54hiN8PU3uAiSV7lx1yYNpbNmex2PK6dSJoNTSJUUswT651yww3Mg==",
++      "license": "MIT"
++    },
+     "node_modules/loose-envify": {
+       "version": "1.4.0",
+       "resolved": "https://registry.npmjs.org/loose-envify/-/loose-envify-1.4.0.tgz",
+@@ -6830,4 +6982,4 @@
+       "license": "ISC"
+     }
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/package.json b/package.json
+index e8d82c5..b503153 100644
+--- a/package.json
++++ b/package.json
+@@ -16,8 +16,11 @@
+   "dependencies": {
+     "@googlemaps/js-api-loader": "^1.16.8",
+     "@prisma/client": "^5.20.0",
++    "bcryptjs": "^3.0.3",
+     "cors": "^2.8.5",
+     "express": "^4.21.0",
++    "express-rate-limit": "^8.7.2",
++    "jsonwebtoken": "^9.0.3",
+     "react": "^18.3.1",
+     "react-dom": "^18.3.1",
+     "react-router-dom": "^6.26.2",
+@@ -29,4 +32,4 @@
+     "vite": "^5.4.6",
+     "vite-plugin-pwa": "^0.20.5"
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/prisma/migrations/20261030090000_accounts/migration.sql b/prisma/migrations/20261030090000_accounts/migration.sql
+new file mode 100644
+index 0000000..9eb9170
+--- /dev/null
++++ b/prisma/migrations/20261030090000_accounts/migration.sql
+@@ -0,0 +1,38 @@
++-- Real accounts: email/username/password, profile fields, and password resets.
++-- Existing anonymous (device-id) users are kept untouched; the new columns are
++-- nullable so they remain valid, and registering from the same device claims them.
++
++-- AlterTable
++ALTER TABLE "User" ADD COLUMN     "bio" TEXT,
++ADD COLUMN     "email" TEXT,
++ADD COLUMN     "passwordHash" TEXT,
++ADD COLUMN     "tokenVersion" INTEGER NOT NULL DEFAULT 0,
++ADD COLUMN     "username" TEXT,
++ALTER COLUMN "deviceId" DROP NOT NULL;
++
++-- CreateTable
++CREATE TABLE "PasswordReset" (
++    "id" TEXT NOT NULL,
++    "tokenHash" TEXT NOT NULL,
++    "expiresAt" TIMESTAMP(3) NOT NULL,
++    "usedAt" TIMESTAMP(3),
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "userId" TEXT NOT NULL,
++
++    CONSTRAINT "PasswordReset_pkey" PRIMARY KEY ("id")
++);
++
++-- CreateIndex
++CREATE UNIQUE INDEX "PasswordReset_tokenHash_key" ON "PasswordReset"("tokenHash");
++
++-- CreateIndex
++CREATE INDEX "PasswordReset_userId_idx" ON "PasswordReset"("userId");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
++
++-- CreateIndex
++CREATE UNIQUE INDEX "User_username_key" ON "User"("username");
++
++-- AddForeignKey
++ALTER TABLE "PasswordReset" ADD CONSTRAINT "PasswordReset_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 3f6e9a0..2b6506b 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -12,13 +12,36 @@ datasource db {
+ }
+ 
+ model User {
+-  id        String   @id @default(cuid())
+-  deviceId  String   @unique // anonymous id generated on-device, see src/lib/user.js
+-  name      String   @default("You")
+-  createdAt DateTime @default(now())
++  id           String   @id @default(cuid())
++  // Legacy anonymous id from before accounts existed. New users never get one;
++  // it is only kept so an old device can claim its log when it registers.
++  deviceId     String?  @unique
++  // email/username/passwordHash are null only for those legacy anonymous rows.
++  email        String?  @unique // stored lowercased
++  username     String?  @unique // stored lowercased, 3-20 chars [a-z0-9_]
++  passwordHash String?
++  name         String   @default("You") // display name
++  bio          String?
++  // Bumped on password change/reset so every existing session cookie stops working.
++  tokenVersion Int      @default(0)
++  createdAt    DateTime @default(now())
+ 
+-  reviews Review[]
+-  visits  Visit[]
++  reviews        Review[]
++  visits         Visit[]
++  passwordResets PasswordReset[]
++}
++
++model PasswordReset {
++  id        String    @id @default(cuid())
++  tokenHash String    @unique // SHA-256 of the emailed token; the raw token is never stored
++  expiresAt DateTime
++  usedAt    DateTime?
++  createdAt DateTime  @default(now())
++
++  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
++  userId String
++
++  @@index([userId])
+ }
+ 
+ model Cafe {
+diff --git a/server/index.js b/server/index.js
+index 1ee954a..7704d47 100644
+--- a/server/index.js
++++ b/server/index.js
+@@ -1,6 +1,9 @@
+ import express from 'express'
+ import cors from 'cors'
+-import { prisma } from './lib/prisma.js'
++import { attachUser } from './lib/auth.js'
++import authRouter from './routes/auth.js'
++import meRouter from './routes/me.js'
++import usersRouter from './routes/users.js'
+ import cafesRouter from './routes/cafes.js'
+ import reviewsRouter from './routes/reviews.js'
+ import visitsRouter from './routes/visits.js'
+@@ -8,43 +11,19 @@ import logRouter from './routes/log.js'
+ 
+ const app = express()
+ 
++// Behind Vercel's proxy; needed so rate limiting sees the real client IP.
++app.set('trust proxy', 1)
++
+ app.use(cors())
+-app.use(express.json())
+-
+-// Every request carries an anonymous device id (generated client-side and
+-// stored in localStorage — see src/lib/user.js). We upsert a matching User
+-// row and attach it to the request so route handlers never touch prisma
+-// user lookups themselves.
+-app.use('/api', async (req, res, next) => {
+-  try {
+-    const deviceId = req.header('x-device-id')
+-    if (!deviceId) {
+-      return res.status(400).json({ error: 'Missing x-device-id header' })
+-    }
+-    const user = await prisma.user.upsert({
+-      where: { deviceId },
+-      update: {},
+-      create: { deviceId }
+-    })
+-    req.user = user
+-    next()
+-  } catch (err) {
+-    next(err)
+-  }
+-})
++app.use(express.json({ limit: '20kb' }))
+ 
+-app.get('/api/me', (req, res) => res.json({ user: req.user }))
+-
+-app.patch('/api/me', async (req, res, next) => {
+-  try {
+-    const name = (req.body.name || '').trim().slice(0, 40)
+-    if (!name) return res.status(400).json({ error: 'name is required' })
+-    const user = await prisma.user.update({ where: { id: req.user.id }, data: { name } })
+-    res.json({ user })
+-  } catch (err) {
+-    next(err)
+-  }
+-})
++// Reads the session cookie and sets req.user (or null for guests). Routes that
++// need an account add requireAuth; browsing routes work for everyone.
++app.use('/api', attachUser)
++
++app.use('/api/auth', authRouter)
++app.use('/api/me', meRouter)
++app.use('/api/users', usersRouter)
+ app.use('/api/cafes', cafesRouter)
+ app.use('/api/reviews', reviewsRouter)
+ app.use('/api/visits', visitsRouter)
+diff --git a/server/lib/auth.js b/server/lib/auth.js
+new file mode 100644
+index 0000000..09b6cd0
+--- /dev/null
++++ b/server/lib/auth.js
+@@ -0,0 +1,102 @@
++import bcrypt from 'bcryptjs'
++import jwt from 'jsonwebtoken'
++import { prisma } from './prisma.js'
++
++// Sessions are a signed JWT in an httpOnly cookie. The cookie is SameSite=Lax
++// and every write endpoint expects a JSON body, so other sites cannot forge
++// requests with it. `tv` (tokenVersion) lets us invalidate every session at
++// once by bumping the number on the user row, which is what a password
++// change or reset does.
++
++const COOKIE_NAME = 'cf_session'
++const MAX_AGE_SECONDS = 60 * 60 * 24 * 30 // 30 days
++const isProd = process.env.NODE_ENV === 'production'
++
++function jwtSecret() {
++  const secret = process.env.JWT_SECRET
++  if (secret) return secret
++  if (isProd) throw new Error('JWT_SECRET must be set in production')
++  return 'dev-only-insecure-secret' // local development only
++}
++
++// ---- passwords -------------------------------------------------------------
++
++const BCRYPT_ROUNDS = 10
++// Compared against when no account matches, so a miss takes as long as a hit.
++const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', BCRYPT_ROUNDS)
++
++export const hashPassword = (password) => bcrypt.hash(password, BCRYPT_ROUNDS)
++
++export async function checkPassword(password, hash) {
++  return bcrypt.compare(typeof password === 'string' ? password : '', hash || DUMMY_HASH).then((ok) => ok && Boolean(hash))
++}
++
++// ---- cookies ---------------------------------------------------------------
++
++function parseCookies(header = '') {
++  const out = {}
++  for (const part of header.split(';')) {
++    const i = part.indexOf('=')
++    if (i < 0) continue
++    try {
++      out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim())
++    } catch {
++      // ignore malformed cookie values
++    }
++  }
++  return out
++}
++
++function cookieString(value, maxAge) {
++  const attrs = [`${COOKIE_NAME}=${value}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`]
++  if (isProd) attrs.push('Secure')
++  return attrs.join('; ')
++}
++
++export function startSession(res, user) {
++  const token = jwt.sign({ sub: user.id, tv: user.tokenVersion }, jwtSecret(), { expiresIn: MAX_AGE_SECONDS })
++  res.setHeader('Set-Cookie', cookieString(token, MAX_AGE_SECONDS))
++}
++
++export function endSession(res) {
++  res.setHeader('Set-Cookie', cookieString('', 0))
++}
++
++// ---- middleware ------------------------------------------------------------
++
++// Sets req.user to the signed-in user, or null for guests. Never rejects, so
++// public routes (browsing cafes) can use it too.
++export async function attachUser(req, res, next) {
++  req.user = null
++  try {
++    const token = parseCookies(req.headers.cookie)[COOKIE_NAME]
++    if (token) {
++      const payload = jwt.verify(token, jwtSecret())
++      const user = await prisma.user.findUnique({ where: { id: payload.sub } })
++      if (user && user.tokenVersion === payload.tv) req.user = user
++    }
++  } catch (err) {
++    // An expired or tampered token just means "guest". Anything else is a real error.
++    if (!(err instanceof jwt.JsonWebTokenError || err instanceof jwt.TokenExpiredError)) return next(err)
++  }
++  next()
++}
++
++export function requireAuth(req, res, next) {
++  if (!req.user) return res.status(401).json({ error: 'Sign in to do that.', code: 'auth_required' })
++  next()
++}
++
++// ---- serializers -----------------------------------------------------------
++
++// What the signed-in person sees about themselves.
++export function privateUser(user) {
++  return {
++    id: user.id,
++    email: user.email,
++    username: user.username,
++    name: user.name,
++    bio: user.bio,
++    createdAt: user.createdAt
++  }
++}
+diff --git a/server/lib/mail.js b/server/lib/mail.js
+new file mode 100644
+index 0000000..4986058
+--- /dev/null
++++ b/server/lib/mail.js
+@@ -0,0 +1,46 @@
++// Password-reset email. Uses Resend's REST API when RESEND_API_KEY is set.
++// Without a key, local development prints the link to the server console so
++// the flow can still be tested; production never logs the link.
++
++const isProd = process.env.NODE_ENV === 'production'
++
++export function appUrl() {
++  if (process.env.APP_URL) return process.env.APP_URL.replace(/\/$/, '')
++  // Vercel exposes the production domain (no protocol) as a system variable.
++  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
++  return 'http://localhost:5173'
++}
++
++export async function sendPasswordResetEmail(to, link) {
++  const key = process.env.RESEND_API_KEY
++
++  if (!key) {
++    if (isProd) {
++      console.error('[mail] RESEND_API_KEY is not set, so the password reset email was not sent.')
++    } else {
++      console.log(`[mail] Password reset link for ${to}:\n${link}`)
++    }
++    return
++  }
++
++  const from = process.env.EMAIL_FROM || 'CaféFinds <onboarding@resend.dev>'
++  const text = `Someone asked to reset the password for your CaféFinds account.\n\nChoose a new password (the link works for one hour):\n${link}\n\nIf this wasn't you, you can ignore this email and your password stays the same.`
++  const html = `<div style="font-family:system-ui,sans-serif;max-width:420px;margin:0 auto;padding:24px;color:#1c1410">
++  <h1 style="font-size:22px;margin:0 0 12px">Reset your password</h1>
++  <p style="line-height:1.5;margin:0 0 20px">Someone asked to reset the password for your CaféFinds account. The link works for one hour.</p>
++  <p style="margin:0 0 20px"><a href="${link}" style="display:inline-block;background:#d2303f;color:#fff;text-decoration:none;padding:12px 20px;border-radius:999px;font-weight:600">Choose a new password</a></p>
++  <p style="line-height:1.5;color:#5e655f;font-size:13px;margin:0">If this wasn't you, ignore this email and your password stays the same.</p>
++</div>`
++
++  try {
++    const res = await fetch('https://api.resend.com/emails', {
++      method: 'POST',
++      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
++      body: JSON.stringify({ from, to, subject: 'Reset your CaféFinds password', html, text })
++    })
++    if (!res.ok) console.error('[mail] Resend rejected the email:', res.status, await res.text())
++  } catch (err) {
++    // Swallow: the caller always answers the same way so we never reveal which emails have accounts.
++    console.error('[mail] Could not reach Resend:', err.message)
++  }
++}
+diff --git a/server/lib/validate.js b/server/lib/validate.js
+new file mode 100644
+index 0000000..596676e
+--- /dev/null
++++ b/server/lib/validate.js
+@@ -0,0 +1,44 @@
++// Small input validators shared by the auth, settings and review routes.
++// Each returns { value } on success or { error } with a message that is safe
++// to show to the person filling in the form.
++
++const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
++const USERNAME_RE = /^[a-z0-9_]{3,20}$/
++
++export function parseEmail(raw) {
++  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
++  if (!value) return { error: 'Enter your email address.' }
++  if (value.length > 254 || !EMAIL_RE.test(value)) return { error: 'Enter a valid email address.' }
++  return { value }
++}
++
++export function parseUsername(raw) {
++  const value = typeof raw === 'string' ? raw.trim().toLowerCase().replace(/^@/, '') : ''
++  if (!value) return { error: 'Choose a username.' }
++  if (!USERNAME_RE.test(value)) {
++    return { error: 'Usernames are 3–20 characters: letters, numbers and underscores.' }
++  }
++  return { value }
++}
++
++// bcrypt only reads the first 72 bytes, so reject anything longer instead of
++// silently truncating it.
++export function parsePassword(raw) {
++  if (typeof raw !== 'string' || raw.length < 8) {
++    return { error: 'Use at least 8 characters for your password.' }
++  }
++  if (Buffer.byteLength(raw, 'utf8') > 72) {
++    return { error: 'That password is too long. Keep it under 72 bytes.' }
++  }
++  return { value: raw }
++}
++
++export function parseDisplayName(raw, fallback = '') {
++  const value = typeof raw === 'string' ? raw.trim().replace(/\s+/g, ' ').slice(0, 40) : ''
++  return { value: value || fallback }
++}
++
++export function parseBio(raw) {
++  const value = typeof raw === 'string' ? raw.trim().slice(0, 160) : ''
++  return { value: value || null }
++}
+diff --git a/server/routes/auth.js b/server/routes/auth.js
+new file mode 100644
+index 0000000..3682a70
+--- /dev/null
++++ b/server/routes/auth.js
+@@ -0,0 +1,164 @@
++import crypto from 'node:crypto'
++import { Router } from 'express'
++import rateLimit from 'express-rate-limit'
++import { prisma } from '../lib/prisma.js'
++import { checkPassword, endSession, hashPassword, privateUser, startSession } from '../lib/auth.js'
++import { appUrl, sendPasswordResetEmail } from '../lib/mail.js'
++import { parseDisplayName, parseEmail, parsePassword, parseUsername } from '../lib/validate.js'
++
++const router = Router()
++
++// Best-effort brute-force protection. On serverless each instance keeps its
++// own counter, so treat this as a speed bump and put a shared store (or the
++// host's firewall) behind it if the app gets real traffic.
++const limiter = rateLimit({
++  windowMs: 15 * 60 * 1000,
++  limit: 20,
++  standardHeaders: 'draft-7',
++  legacyHeaders: false,
++  message: { error: 'Too many attempts. Wait a few minutes and try again.' }
++})
++
++const fail = (res, status, error, field) => res.status(status).json({ error, ...(field ? { field } : {}) })
++
++const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex')
++
++router.get('/me', (req, res) => {
++  res.json({ user: req.user ? privateUser(req.user) : null })
++})
++
++router.post('/register', limiter, async (req, res, next) => {
++  try {
++    const body = req.body ?? {}
++    const email = parseEmail(body.email)
++    if (email.error) return fail(res, 400, email.error, 'email')
++    const username = parseUsername(body.username)
++    if (username.error) return fail(res, 400, username.error, 'username')
++    const password = parsePassword(body.password)
++    if (password.error) return fail(res, 400, password.error, 'password')
++    const name = parseDisplayName(body.name, username.value)
++
++    const taken = await prisma.user.findFirst({
++      where: { OR: [{ email: email.value }, { username: username.value }] }
++    })
++    if (taken) {
++      return taken.email === email.value
++        ? fail(res, 409, 'An account with this email already exists. Try signing in.', 'email')
++        : fail(res, 409, 'That username is taken. Try another.', 'username')
++    }
++
++    const passwordHash = await hashPassword(password.value)
++    const data = { email: email.value, username: username.value, name: name.value, passwordHash }
++
++    // Someone who used the app before accounts existed still has a device id.
++    // If that anonymous profile is unclaimed, turn it into this account so
++    // their visited list and reviews carry over.
++    let legacy = null
++    if (typeof body.deviceId === 'string' && body.deviceId) {
++      const found = await prisma.user.findUnique({ where: { deviceId: body.deviceId } })
++      if (found && !found.passwordHash) legacy = found
++    }
++
++    const user = legacy
++      ? await prisma.user.update({ where: { id: legacy.id }, data: { ...data, deviceId: null } })
++      : await prisma.user.create({ data })
++
++    startSession(res, user)
++    res.status(201).json({ user: privateUser(user), claimedLegacy: Boolean(legacy) })
++  } catch (err) {
++    // Two people registering the same email or username at once.
++    if (err?.code === 'P2002') return fail(res, 409, 'That email or username is already taken.')
++    next(err)
++  }
++})
++
++router.post('/login', limiter, async (req, res, next) => {
++  try {
++    const identifier = typeof req.body?.identifier === 'string' ? req.body.identifier.trim().toLowerCase().replace(/^@/, '') : ''
++    const password = req.body?.password
++    if (!identifier || typeof password !== 'string' || !password) {
++      return fail(res, 400, 'Enter your email or username and your password.')
++    }
++
++    const user = await prisma.user.findUnique({
++      where: identifier.includes('@') ? { email: identifier } : { username: identifier }
++    })
++
++    if (!(await checkPassword(password, user?.passwordHash))) {
++      return fail(res, 401, 'That email, username or password is not right.')
++    }
++
++    startSession(res, user)
++    res.json({ user: privateUser(user) })
++  } catch (err) {
++    next(err)
++  }
++})
++
++router.post('/logout', (req, res) => {
++  endSession(res)
++  res.status(204).end()
++})
++
++// Always answers the same way, whether or not the email has an account, so
++// the form can't be used to find out who is registered.
++router.post('/forgot', limiter, async (req, res, next) => {
++  try {
++    const email = parseEmail(req.body?.email)
++    if (email.error) return fail(res, 400, email.error, 'email')
++
++    const user = await prisma.user.findUnique({ where: { email: email.value } })
++    if (user?.passwordHash) {
++      const token = crypto.randomBytes(32).toString('base64url')
++      await prisma.passwordReset.deleteMany({ where: { userId: user.id } })
++      await prisma.passwordReset.create({
++        data: {
++          userId: user.id,
++          tokenHash: sha256(token),
++          expiresAt: new Date(Date.now() + 60 * 60 * 1000) // 1 hour
++        }
++      })
++      await sendPasswordResetEmail(user.email, `${appUrl()}/reset-password?token=${token}`)
++    }
++
++    res.json({ ok: true })
++  } catch (err) {
++    next(err)
++  }
++})
++
++router.post('/reset', limiter, async (req, res, next) => {
++  try {
++    const token = typeof req.body?.token === 'string' ? req.body.token : ''
++    const password = parsePassword(req.body?.password)
++    if (password.error) return fail(res, 400, password.error, 'password')
++
++    const invalid = () => fail(res, 400, 'This reset link has expired or was already used. Request a new one.')
++    if (!token) return invalid()
++
++    const reset = await prisma.passwordReset.findUnique({ where: { tokenHash: sha256(token) } })
++    if (!reset || reset.usedAt || reset.expiresAt < new Date()) return invalid()
++
++    // Claim the token atomically so a link can only ever be used once, even
++    // if two requests race.
++    const claimed = await prisma.passwordReset.updateMany({
++      where: { id: reset.id, usedAt: null },
++      data: { usedAt: new Date() }
++    })
++    if (claimed.count !== 1) return invalid()
++
++    // Bumping tokenVersion signs out every other session on this account.
++    const user = await prisma.user.update({
++      where: { id: reset.userId },
++      data: { passwordHash: await hashPassword(password.value), tokenVersion: { increment: 1 } }
++    })
++    await prisma.passwordReset.deleteMany({ where: { userId: user.id } })
++
++    startSession(res, user)
++    res.json({ user: privateUser(user) })
++  } catch (err) {
++    next(err)
++  }
++})
++
++export default router
+diff --git a/server/routes/cafes.js b/server/routes/cafes.js
+index 09c21d7..3f71702 100644
+--- a/server/routes/cafes.js
++++ b/server/routes/cafes.js
+@@ -1,8 +1,11 @@
+ import { Router } from 'express'
+ import { prisma } from '../lib/prisma.js'
++import { requireAuth } from '../lib/auth.js'
+ 
+ const router = Router()
+ 
++// Guests get the same cafe data as everyone else (rating, other people's
++// reviews); they just have no visit state or review of their own.
+ function serializeCafe(cafe, userId) {
+   const ratings = cafe.reviews.map((r) => r.rating)
+   const avgRating = ratings.length
+@@ -18,49 +21,70 @@ function serializeCafe(cafe, userId) {
+     lng: cafe.lng,
+     avgRating,
+     reviewCount: ratings.length,
+-    visited: cafe.visits.some((v) => v.userId === userId),
+-    myReview: cafe.reviews.find((r) => r.userId === userId) ?? null,
++    visited: userId ? (cafe.visits ?? []).length > 0 : false,
++    myReview: userId ? (cafe.reviews.find((r) => r.userId === userId) ?? null) : null,
+     reviews: cafe.reviews
+       .filter((r) => r.userId !== userId)
+-      .map((r) => ({ id: r.id, rating: r.rating, text: r.text, createdAt: r.createdAt, userName: r.user.name }))
++      .map((r) => ({
++        id: r.id,
++        rating: r.rating,
++        text: r.text,
++        createdAt: r.createdAt,
++        userName: r.user.name,
++        username: r.user.username
++      }))
+   }
+ }
+ 
+-const include = {
+-  reviews: { include: { user: true } },
+-  visits: true
++function includeFor(userId) {
++  return {
++    reviews: {
++      include: { user: { select: { name: true, username: true } } },
++      orderBy: { createdAt: 'desc' }
++    },
++    // Only this person's own visit is needed to know if they've been.
++    ...(userId ? { visits: { where: { userId } } } : {})
++  }
+ }
+ 
+-// Find-or-create a cafe from Google Place data, then return it fully hydrated.
+-// The client calls this the first time a place is opened so every cafe in
+-// our DB always originates from a real Google Place.
+-router.post('/upsert', async (req, res, next) => {
++// Guests can open any cafe. If nobody has logged it yet there is no row, and
++// the client shows an empty one built from the Google Places data it already has.
++router.get('/:placeId', async (req, res, next) => {
+   try {
+-    const { placeId, name, address, lat, lng } = req.body
+-    if (!placeId || !name || typeof lat !== 'number' || typeof lng !== 'number') {
+-      return res.status(400).json({ error: 'placeId, name, lat and lng are required' })
+-    }
+-
+-    const cafe = await prisma.cafe.upsert({
+-      where: { placeId },
+-      update: { name, address, lat, lng },
+-      create: { placeId, name, address, lat, lng },
+-      include
++    const cafe = await prisma.cafe.findUnique({
++      where: { placeId: req.params.placeId },
++      include: includeFor(req.user?.id)
+     })
+-
+-    res.json(serializeCafe(cafe, req.user.id))
++    if (!cafe) return res.status(404).json({ error: 'Cafe not tracked yet' })
++    res.json(serializeCafe(cafe, req.user?.id))
+   } catch (err) {
+     next(err)
+   }
+ })
+ 
+-router.get('/:placeId', async (req, res, next) => {
++// Find-or-create a cafe from Google Place data. Only signed-in people can
++// create rows, which keeps guests from filling the database just by browsing.
++// Existing cafes are never overwritten from client input.
++router.post('/upsert', requireAuth, async (req, res, next) => {
+   try {
+-    const cafe = await prisma.cafe.findUnique({
+-      where: { placeId: req.params.placeId },
+-      include
++    const { placeId, name, address, lat, lng } = req.body ?? {}
++    if (!placeId || !name || typeof lat !== 'number' || typeof lng !== 'number') {
++      return res.status(400).json({ error: 'placeId, name, lat and lng are required' })
++    }
++
++    const cafe = await prisma.cafe.upsert({
++      where: { placeId },
++      update: {},
++      create: {
++        placeId: String(placeId).slice(0, 300),
++        name: String(name).slice(0, 200),
++        address: address ? String(address).slice(0, 300) : null,
++        lat,
++        lng
++      },
++      include: includeFor(req.user.id)
+     })
+-    if (!cafe) return res.status(404).json({ error: 'Cafe not tracked yet' })
++
+     res.json(serializeCafe(cafe, req.user.id))
+   } catch (err) {
+     next(err)
+diff --git a/server/routes/log.js b/server/routes/log.js
+index f08d0a9..b8fc592 100644
+--- a/server/routes/log.js
++++ b/server/routes/log.js
+@@ -1,8 +1,11 @@
+ import { Router } from 'express'
+ import { prisma } from '../lib/prisma.js'
++import { requireAuth } from '../lib/auth.js'
+ 
+ const router = Router()
+ 
++router.use(requireAuth)
++
+ // The "Letterboxd diary" view: every cafe the current user has checked off,
+ // newest first, with their own review if they left one.
+ router.get('/', async (req, res, next) => {
+diff --git a/server/routes/me.js b/server/routes/me.js
+new file mode 100644
+index 0000000..fe6b1ec
+--- /dev/null
++++ b/server/routes/me.js
+@@ -0,0 +1,99 @@
++import { Router } from 'express'
++import { prisma } from '../lib/prisma.js'
++import { checkPassword, endSession, hashPassword, privateUser, requireAuth, startSession } from '../lib/auth.js'
++import { parseBio, parseDisplayName, parseEmail, parsePassword, parseUsername } from '../lib/validate.js'
++
++const router = Router()
++
++// Everything under /api/me is the signed-in person's own account.
++router.use(requireAuth)
++
++const fail = (res, status, error, field) => res.status(status).json({ error, ...(field ? { field } : {}) })
++
++router.get('/', (req, res) => res.json({ user: privateUser(req.user) }))
++
++// Profile and account details. Only the fields that are sent get changed.
++// Changing the email needs the current password, because the email is what
++// "forgot password" trusts.
++router.patch('/', async (req, res, next) => {
++  try {
++    const body = req.body ?? {}
++    const data = {}
++
++    if ('name' in body) {
++      const name = parseDisplayName(body.name)
++      if (!name.value) return fail(res, 400, 'Your display name can’t be empty.', 'name')
++      data.name = name.value
++    }
++
++    if ('bio' in body) data.bio = parseBio(body.bio).value
++
++    if ('username' in body) {
++      const username = parseUsername(body.username)
++      if (username.error) return fail(res, 400, username.error, 'username')
++      if (username.value !== req.user.username) {
++        const taken = await prisma.user.findUnique({ where: { username: username.value } })
++        if (taken) return fail(res, 409, 'That username is taken. Try another.', 'username')
++        data.username = username.value
++      }
++    }
++
++    if ('email' in body) {
++      const email = parseEmail(body.email)
++      if (email.error) return fail(res, 400, email.error, 'email')
++      if (email.value !== req.user.email) {
++        if (!(await checkPassword(body.currentPassword, req.user.passwordHash))) {
++          return fail(res, 403, 'Enter your current password to change your email.', 'currentPassword')
++        }
++        const taken = await prisma.user.findUnique({ where: { email: email.value } })
++        if (taken) return fail(res, 409, 'Another account already uses that email.', 'email')
++        data.email = email.value
++      }
++    }
++
++    const user = Object.keys(data).length
++      ? await prisma.user.update({ where: { id: req.user.id }, data })
++      : req.user
++    res.json({ user: privateUser(user) })
++  } catch (err) {
++    if (err?.code === 'P2002') return fail(res, 409, 'That username or email is already taken.')
++    next(err)
++  }
++})
++
++router.post('/password', async (req, res, next) => {
++  try {
++    const { currentPassword, newPassword } = req.body ?? {}
++    if (!(await checkPassword(currentPassword, req.user.passwordHash))) {
++      return fail(res, 403, 'Your current password is not right.', 'currentPassword')
++    }
++    const password = parsePassword(newPassword)
++    if (password.error) return fail(res, 400, password.error, 'newPassword')
++
++    const user = await prisma.user.update({
++      where: { id: req.user.id },
++      data: { passwordHash: await hashPassword(password.value), tokenVersion: { increment: 1 } }
++    })
++    // Other devices are signed out; this one gets a fresh session.
++    startSession(res, user)
++    res.json({ user: privateUser(user) })
++  } catch (err) {
++    next(err)
++  }
++})
++
++// Deletes the account and, through cascading deletes, its reviews and visits.
++router.delete('/', async (req, res, next) => {
++  try {
++    if (!(await checkPassword(req.body?.password, req.user.passwordHash))) {
++      return fail(res, 403, 'Your password is not right.', 'password')
++    }
++    await prisma.user.delete({ where: { id: req.user.id } })
++    endSession(res)
++    res.status(204).end()
++  } catch (err) {
++    next(err)
++  }
++})
++
++export default router
+diff --git a/server/routes/reviews.js b/server/routes/reviews.js
+index ba32a8a..6ebe501 100644
+--- a/server/routes/reviews.js
++++ b/server/routes/reviews.js
+@@ -1,21 +1,30 @@
+ import { Router } from 'express'
+ import { prisma } from '../lib/prisma.js'
++import { requireAuth } from '../lib/auth.js'
+ 
+ const router = Router()
+ 
++// Writing reviews needs an account. Reading them does not (see cafes.js).
++router.use(requireAuth)
++
+ // Upsert the current user's review for a cafe. One review per user per cafe;
+ // posting again edits it.
+ router.post('/', async (req, res, next) => {
+   try {
+-    const { cafeId, rating, text } = req.body
++    const { cafeId, rating, text } = req.body ?? {}
+     if (!cafeId || !Number.isInteger(rating) || rating < 1 || rating > 5) {
+       return res.status(400).json({ error: 'cafeId and an integer rating 1-5 are required' })
+     }
+ 
++    const cafe = await prisma.cafe.findUnique({ where: { id: cafeId } })
++    if (!cafe) return res.status(404).json({ error: 'That cafe could not be found.' })
++
++    const note = typeof text === 'string' ? text.trim().slice(0, 500) || null : null
++
+     const review = await prisma.review.upsert({
+       where: { userId_cafeId: { userId: req.user.id, cafeId } },
+-      update: { rating, text: text ?? null },
+-      create: { userId: req.user.id, cafeId, rating, text: text ?? null }
++      update: { rating, text: note },
++      create: { userId: req.user.id, cafeId, rating, text: note }
+     })
+ 
+     // Logging a review implies a visit — keep the checklist in sync.
+diff --git a/server/routes/users.js b/server/routes/users.js
+new file mode 100644
+index 0000000..d09342a
+--- /dev/null
++++ b/server/routes/users.js
+@@ -0,0 +1,43 @@
++import { Router } from 'express'
++import { prisma } from '../lib/prisma.js'
++
++const router = Router()
++
++// Public profile: anyone can see a person's name, bio, stats and reviews.
++// Visits that have no review stay private — only the count is shown.
++router.get('/:username', async (req, res, next) => {
++  try {
++    const user = await prisma.user.findUnique({ where: { username: req.params.username.toLowerCase() } })
++    if (!user) return res.status(404).json({ error: 'No one here by that username.' })
++
++    const [reviews, visited] = await Promise.all([
++      prisma.review.findMany({
++        where: { userId: user.id },
++        include: { cafe: { select: { placeId: true, name: true, address: true } } },
++        orderBy: { createdAt: 'desc' }
++      }),
++      prisma.visit.count({ where: { userId: user.id } })
++    ])
++
++    const avgRating = reviews.length
++      ? Math.round((reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length) * 10) / 10
++      : null
++
++    res.json({
++      user: { username: user.username, name: user.name, bio: user.bio, joinedAt: user.createdAt },
++      isMe: req.user?.id === user.id,
++      stats: { visited, reviewed: reviews.length, avgRating },
++      reviews: reviews.slice(0, 50).map((r) => ({
++        id: r.id,
++        rating: r.rating,
++        text: r.text,
++        createdAt: r.createdAt,
++        cafe: r.cafe
++      }))
++    })
++  } catch (err) {
++    next(err)
++  }
++})
++
++export default router
+diff --git a/server/routes/visits.js b/server/routes/visits.js
+index fdaa732..06467e6 100644
+--- a/server/routes/visits.js
++++ b/server/routes/visits.js
+@@ -1,8 +1,11 @@
+ import { Router } from 'express'
+ import { prisma } from '../lib/prisma.js'
++import { requireAuth } from '../lib/auth.js'
+ 
+ const router = Router()
+ 
++router.use(requireAuth)
++
+ // Toggle the checklist state for a cafe. Idempotent create/delete pair
+ // keyed on the (userId, cafeId) unique constraint.
+ router.post('/toggle', async (req, res, next) => {
+diff --git a/src/App.jsx b/src/App.jsx
+index e5a42b3..4992e70 100644
+--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -1,18 +1,80 @@
+-import { Route, Routes } from 'react-router-dom'
+-import MapPage from './pages/MapPage.jsx'
++import { Link, Route, Routes } from 'react-router-dom'
++import Dock from './components/Dock.jsx'
++import { GuestOnly, ProfileRedirect, RequireAuth } from './components/RouteGuards.jsx'
++import { AuthProvider } from './lib/auth.jsx'
++import ForgotPasswordPage from './pages/ForgotPasswordPage.jsx'
++import LoginPage from './pages/LoginPage.jsx'
+ import LogPage from './pages/LogPage.jsx'
++import MapPage from './pages/MapPage.jsx'
+ import ProfilePage from './pages/ProfilePage.jsx'
+-import BottomNav from './components/BottomNav.jsx'
++import RegisterPage from './pages/RegisterPage.jsx'
++import ResetPasswordPage from './pages/ResetPasswordPage.jsx'
++import SettingsPage from './pages/SettingsPage.jsx'
+ 
+-export default function App() {
++function NotFound() {
+   return (
+-    <div className="app-shell">
+-      <Routes>
+-        <Route path="/" element={<MapPage />} />
+-        <Route path="/log" element={<LogPage />} />
+-        <Route path="/profile" element={<ProfilePage />} />
+-      </Routes>
+-      <BottomNav />
++    <div className="error-state">
++      <h1>Page not found</h1>
++      <p>That link doesn’t go anywhere.</p>
++      <Link to="/" className="btn btn-secondary">
++        Back to the map
++      </Link>
+     </div>
+   )
+ }
++
++export default function App() {
++  return (
++    <AuthProvider>
++      <div className="app-shell">
++        <Routes>
++          {/* Open to everyone: browse the map, read logs, view profiles. */}
++          <Route path="/" element={<MapPage />} />
++          <Route path="/u/:username" element={<ProfilePage />} />
++
++          {/* Needs an account. */}
++          <Route
++            path="/log"
++            element={
++              <RequireAuth reason="Sign in to see your log.">
++                <LogPage />
++              </RequireAuth>
++            }
++          />
++          <Route
++            path="/settings"
++            element={
++              <RequireAuth reason="Sign in to open your settings.">
++                <SettingsPage />
++              </RequireAuth>
++            }
++          />
++          <Route path="/profile" element={<ProfileRedirect />} />
++
++          {/* Account screens. */}
++          <Route
++            path="/login"
++            element={
++              <GuestOnly>
++                <LoginPage />
++              </GuestOnly>
++            }
++          />
++          <Route
++            path="/register"
++            element={
++              <GuestOnly>
++                <RegisterPage />
++              </GuestOnly>
++            }
++          />
++          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
++          <Route path="/reset-password" element={<ResetPasswordPage />} />
++
++          <Route path="*" element={<NotFound />} />
++        </Routes>
++        <Dock />
++      </div>
++    </AuthProvider>
++  )
++}
+diff --git a/src/components/AuthShell.jsx b/src/components/AuthShell.jsx
+new file mode 100644
+index 0000000..938d7c9
+--- /dev/null
++++ b/src/components/AuthShell.jsx
+@@ -0,0 +1,40 @@
++// Shared frame for sign in, create account, forgot and reset password.
++// The steaming cup is the one looping animation in the app; it only plays
++// here, where nothing else is competing for attention.
++
++function SteamCup() {
++  return (
++    <svg className="steam-cup" viewBox="0 0 120 110" fill="none" aria-hidden="true">
++      <g className="steam" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round">
++        <path className="steam-1" d="M44 30c-5-6 5-10 0-17" />
++        <path className="steam-2" d="M60 30c-5-6 5-10 0-17" />
++        <path className="steam-3" d="M76 30c-5-6 5-10 0-17" />
++      </g>
++      <g className="cup">
++        <path d="M30 42h60v22c0 14-11 25-25 25h-10c-14 0-25-11-25-25V42Z" fill="currentColor" />
++        <path d="M90 49h5c6 0 10 4 10 9s-4 9-10 9h-6" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
++        <path d="M24 98h72" stroke="currentColor" strokeWidth="5" strokeLinecap="round" />
++      </g>
++    </svg>
++  )
++}
++
++export default function AuthShell({ title, subtitle, notice, children, footer }) {
++  return (
++    <main className="auth">
++      <div className="auth-hero">
++        <SteamCup />
++        <p className="wordmark">CaféFinds</p>
++      </div>
++
++      <div className="auth-card">
++        <h1>{title}</h1>
++        {subtitle && <p className="auth-sub">{subtitle}</p>}
++        {notice && <p className="auth-notice">{notice}</p>}
++        {children}
++      </div>
++
++      {footer && <p className="auth-foot">{footer}</p>}
++    </main>
++  )
++}
+diff --git a/src/components/Avatar.jsx b/src/components/Avatar.jsx
+new file mode 100644
+index 0000000..e235057
+--- /dev/null
++++ b/src/components/Avatar.jsx
+@@ -0,0 +1,15 @@
++import { initials, toneFor } from '../lib/format.js'
++
++// No photo uploads yet, so avatars are initials on a color picked from the
++// person's username. The same person always gets the same color.
++export default function Avatar({ name, username, size = 40 }) {
++  return (
++    <span
++      className={`avatar tone-${toneFor(username || name)}`}
++      style={{ width: size, height: size, fontSize: Math.round(size * 0.4) }}
++      aria-hidden="true"
++    >
++      {initials(name)}
++    </span>
++  )
++}
+diff --git a/src/components/BeanRating.jsx b/src/components/BeanRating.jsx
+new file mode 100644
+index 0000000..3c4dcfb
+--- /dev/null
++++ b/src/components/BeanRating.jsx
+@@ -0,0 +1,76 @@
++import { useRef, useState } from 'react'
++
++// Ratings are coffee beans, not stars: five beans, filled left to right.
++
++function Bean() {
++  return (
++    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
++      <g transform="rotate(32 12 12)">
++        <ellipse className="bean-body" cx="12" cy="12" rx="6.4" ry="9" />
++        <path className="bean-crease" d="M12 3.6c-2.6 3 2.6 5.4 0 8.4s2.6 5.4 0 8.4" />
++      </g>
++    </svg>
++  )
++}
++
++const BEANS = [1, 2, 3, 4, 5]
++
++export default function BeanRating({ value = 0, onChange, readOnly = false, size = 'md' }) {
++  // Alternates between 'a' and 'b' on every tap so the CSS pop animation
++  // restarts without remounting the buttons (which would drop keyboard focus).
++  const [pop, setPop] = useState(null)
++  const groupRef = useRef(null)
++
++  if (readOnly) {
++    return (
++      <span className={`beans beans-${size}`} role="img" aria-label={`${value} out of 5`}>
++        {BEANS.map((n) => (
++          <span key={n} className={`bean${n <= value ? ' is-on' : ''}`}>
++            <Bean />
++          </span>
++        ))}
++      </span>
++    )
++  }
++
++  function choose(n) {
++    setPop((p) => (p === 'a' ? 'b' : 'a'))
++    onChange(n)
++  }
++
++  function onKeyDown(e) {
++    const step = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key]
++    if (!step) return
++    e.preventDefault()
++    const next = Math.min(5, Math.max(1, (value || 0) + step))
++    choose(next)
++    groupRef.current?.querySelectorAll('button')[next - 1]?.focus()
++  }
++
++  return (
++    <div
++      ref={groupRef}
++      className={`beans beans-${size} is-input`}
++      role="radiogroup"
++      aria-label="Your rating"
++      data-pop={pop ?? undefined}
++      onKeyDown={onKeyDown}
++    >
++      {BEANS.map((n) => (
++        <button
++          key={n}
++          type="button"
++          role="radio"
++          aria-checked={n === value}
++          aria-label={`${n} out of 5`}
++          tabIndex={n === (value || 1) ? 0 : -1}
++          className={`bean${n <= value ? ' is-on' : ''}`}
++          style={{ '--i': n - 1 }}
++          onClick={() => choose(n)}
++        >
++          <Bean />
++        </button>
++      ))}
++    </div>
++  )
++}
+diff --git a/src/components/BottomNav.jsx b/src/components/BottomNav.jsx
+deleted file mode 100644
+index 8b25bb0..0000000
+--- a/src/components/BottomNav.jsx
++++ /dev/null
+@@ -1,52 +0,0 @@
+-import { NavLink } from 'react-router-dom'
+-
+-const items = [
+-  {
+-    to: '/',
+-    label: 'Map',
+-    icon: (
+-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+-        <path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z" strokeLinejoin="round" />
+-        <path d="M9 4v14M15 6v14" />
+-      </svg>
+-    )
+-  },
+-  {
+-    to: '/log',
+-    label: 'Log',
+-    icon: (
+-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+-        <rect x="4" y="3" width="16" height="18" rx="2" />
+-        <path d="M8 8h8M8 12h8M8 16h5" strokeLinecap="round" />
+-      </svg>
+-    )
+-  },
+-  {
+-    to: '/profile',
+-    label: 'You',
+-    icon: (
+-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+-        <circle cx="12" cy="8" r="3.5" />
+-        <path d="M5 20c1.4-3.8 4.2-5.7 7-5.7s5.6 1.9 7 5.7" strokeLinecap="round" />
+-      </svg>
+-    )
+-  }
+-]
+-
+-export default function BottomNav() {
+-  return (
+-    <nav className="bottom-nav">
+-      {items.map((item) => (
+-        <NavLink
+-          key={item.to}
+-          to={item.to}
+-          end={item.to === '/'}
+-          className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}
+-        >
+-          {item.icon}
+-          <span>{item.label}</span>
+-        </NavLink>
+-      ))}
+-    </nav>
+-  )
+-}
+diff --git a/src/components/CafeSheet.jsx b/src/components/CafeSheet.jsx
+index ac172a2..abee62a 100644
+--- a/src/components/CafeSheet.jsx
++++ b/src/components/CafeSheet.jsx
+@@ -1,118 +1,236 @@
+-import { useEffect, useState } from 'react'
++import { useEffect, useRef, useState } from 'react'
++import { Link } from 'react-router-dom'
++import { prefersReducedMotion } from '../lib/motion.js'
++import { plural, timeAgo } from '../lib/format.js'
++import Avatar from './Avatar.jsx'
++import BeanRating from './BeanRating.jsx'
++import { CheckIcon, PlusIcon } from './icons.jsx'
+ import StampBadge from './StampBadge.jsx'
+-import StarRating from './StarRating.jsx'
+ 
+-export default function CafeSheet({ cafe, onClose, onToggleVisit, onSubmitReview, onDeleteReview }) {
++const CLOSE_MS = 200
++
++export default function CafeSheet({ cafe, user, onClose, onToggleVisit, onSubmitReview, onDeleteReview }) {
+   const [rating, setRating] = useState(cafe.myReview?.rating ?? 0)
+   const [text, setText] = useState(cafe.myReview?.text ?? '')
+-  const [saving, setSaving] = useState(false)
++  const [busy, setBusy] = useState('') // 'visit' | 'save' | 'delete' | ''
++  const [error, setError] = useState('')
++  const [stamped, setStamped] = useState(false) // true once this person marks it visited here
++  const [closing, setClosing] = useState(false)
++
++  const sheetRef = useRef(null)
++  const drag = useRef(null)
+ 
++  // Start from the person's saved log whenever a different café opens or the saved log changes.
+   useEffect(() => {
+     setRating(cafe.myReview?.rating ?? 0)
+     setText(cafe.myReview?.text ?? '')
+-  }, [cafe.id, cafe.myReview])
++    setError('')
++  }, [cafe.placeId, cafe.myReview])
++
++  useEffect(() => setStamped(false), [cafe.placeId])
++
++  useEffect(() => {
++    sheetRef.current?.focus()
++  }, [cafe.placeId])
++
++  function close() {
++    if (closing) return
++    if (prefersReducedMotion()) return onClose()
++    setClosing(true)
++    setTimeout(onClose, CLOSE_MS)
++  }
++
++  useEffect(() => {
++    const onKey = (e) => e.key === 'Escape' && close()
++    window.addEventListener('keydown', onKey)
++    return () => window.removeEventListener('keydown', onKey)
++  })
+ 
+-  async function handleSubmit() {
+-    if (!rating) return
+-    setSaving(true)
++  // Swipe down on the handle to dismiss; a short pull springs back.
++  function onGrabDown(e) {
++    if (e.button !== undefined && e.button !== 0) return
++    drag.current = { startY: e.clientY, startT: performance.now(), dy: 0 }
++    e.currentTarget.setPointerCapture(e.pointerId)
++    sheetRef.current.style.transition = 'none'
++  }
++  function onGrabMove(e) {
++    if (!drag.current) return
++    drag.current.dy = Math.max(0, e.clientY - drag.current.startY)
++    sheetRef.current.style.transform = `translateY(${drag.current.dy}px)`
++  }
++  function onGrabUp() {
++    const d = drag.current
++    if (!d) return
++    drag.current = null
++    const el = sheetRef.current
++    el.style.transition = ''
++    const velocity = d.dy / Math.max(1, performance.now() - d.startT)
++    if (d.dy > 110 || velocity > 0.7) close()
++    else el.style.transform = ''
++  }
++
++  async function run(kind, action) {
++    setBusy(kind)
++    setError('')
+     try {
+-      await onSubmitReview(rating, text.trim())
++      await action()
++    } catch (err) {
++      setError(err.message)
+     } finally {
+-      setSaving(false)
++      setBusy('')
+     }
+   }
+ 
++  const toggleVisit = () =>
++    run('visit', async () => {
++      const nowVisited = await onToggleVisit()
++      setStamped(nowVisited)
++    })
++  const saveLog = () => run('save', () => onSubmitReview(rating, text.trim()))
++  const deleteLog = () => run('delete', onDeleteReview)
++
++  const loading = Boolean(cafe.loading)
++  const disabled = loading || Boolean(busy)
++
+   return (
+     <>
+-      <div className="sheet-backdrop" onClick={onClose} />
+-      <div className="sheet" role="dialog" aria-label={cafe.name}>
+-        <div className="sheet-handle" />
++      <div className={`sheet-backdrop${closing ? ' is-closing' : ''}`} onClick={close} />
++      <div
++        ref={sheetRef}
++        className={`sheet${closing ? ' is-closing' : ''}`}
++        role="dialog"
++        aria-modal="true"
++        aria-label={cafe.name}
++        tabIndex={-1}
++      >
++        <div
++          className="sheet-grab"
++          onPointerDown={onGrabDown}
++          onPointerMove={onGrabMove}
++          onPointerUp={onGrabUp}
++          onPointerCancel={onGrabUp}
++        >
++          <span className="sheet-handle" />
++        </div>
++
+         <div className="sheet-body">
+-          <div className="sheet-header">
+-            <div>
++          <header className="sheet-header">
++            <div className="sheet-title">
+               <h2>{cafe.name}</h2>
+               {cafe.address && <p className="sheet-address">{cafe.address}</p>}
+-              <div className="sheet-meta">
+-                {cafe.avgRating ? (
+-                  <>
+-                    <StarRating value={Math.round(cafe.avgRating)} readOnly />
+-                    <span>
+-                      {cafe.avgRating} · {cafe.reviewCount} log{cafe.reviewCount === 1 ? '' : 's'}
+-                    </span>
+-                  </>
+-                ) : (
+-                  <span>No logs yet — be the first</span>
+-                )}
+-              </div>
+             </div>
+-            {cafe.visited && <StampBadge size={48} />}
+-          </div>
++            {cafe.visited && <StampBadge size={56} press={stamped} />}
++          </header>
+ 
+-          <div className="divider" />
+-
+-          <button
+-            type="button"
+-            className={`visit-toggle${cafe.visited ? ' is-visited' : ''}`}
+-            onClick={onToggleVisit}
+-          >
+-            {cafe.visited ? (
++          <div className="sheet-rating">
++            {loading ? (
++              <span className="skeleton" style={{ width: 150, height: 20 }} />
++            ) : cafe.avgRating ? (
+               <>
+-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+-                  <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
+-                </svg>
+-                Been here
++                <span className="sheet-score">{cafe.avgRating.toFixed(1)}</span>
++                <BeanRating value={Math.round(cafe.avgRating)} readOnly />
++                <span className="sheet-count">{plural(cafe.reviewCount, 'log')}</span>
+               </>
+             ) : (
+-              <>
+-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+-                  <circle cx="12" cy="12" r="9" />
+-                </svg>
+-                Mark as visited
+-              </>
++              <span className="sheet-count">No logs yet. Be the first.</span>
+             )}
+-          </button>
+-
+-          <div className="divider" />
++          </div>
+ 
+-          <div className="review-form">
+-            <label className="eyebrow">Your log</label>
+-            <div style={{ marginTop: 8 }}>
+-              <StarRating value={rating} onChange={setRating} />
+-            </div>
+-            <textarea
+-              placeholder="Tasting notes, what you'd order again…"
+-              value={text}
+-              onChange={(e) => setText(e.target.value)}
+-              maxLength={500}
+-            />
+-            <button className="btn-primary" disabled={!rating || saving} onClick={handleSubmit}>
+-              {saving ? 'Saving…' : cafe.myReview ? 'Update log' : 'Save log'}
+-            </button>
+-            {cafe.myReview && (
+-              <button className="btn-text" onClick={onDeleteReview}>
+-                Delete my log
++          {user ? (
++            <>
++              <button
++                type="button"
++                className={`visit-toggle${cafe.visited ? ' is-visited' : ''}`}
++                onClick={toggleVisit}
++                disabled={disabled}
++                aria-pressed={cafe.visited}
++              >
++                {cafe.visited ? <CheckIcon /> : <PlusIcon />}
++                {cafe.visited ? 'Visited' : 'Mark as visited'}
+               </button>
+-            )}
+-          </div>
+ 
+-          <div className="divider" />
++              <section className="log-form" aria-labelledby="your-log">
++                <h3 id="your-log">Your log</h3>
++                <BeanRating value={rating} onChange={setRating} size="lg" />
++                <textarea
++                  placeholder="What did you order? How was the room?"
++                  aria-label="Notes about this café"
++                  value={text}
++                  onChange={(e) => setText(e.target.value)}
++                  maxLength={500}
++                  disabled={disabled}
++                />
++                {error && (
++                  <p className="form-error" role="alert">
++                    {error}
++                  </p>
++                )}
++                <div className="log-actions">
++                  <button type="button" className="btn btn-primary" disabled={!rating || disabled} onClick={saveLog}>
++                    {busy === 'save' ? 'Saving…' : cafe.myReview ? 'Update log' : 'Save log'}
++                  </button>
++                  {cafe.myReview && (
++                    <button type="button" className="btn btn-quiet-danger" disabled={disabled} onClick={deleteLog}>
++                      Delete log
++                    </button>
++                  )}
++                </div>
++              </section>
++            </>
++          ) : (
++            <section className="guest-cta" aria-labelledby="guest-cta-title">
++              <p id="guest-cta-title" className="guest-cta-title">
++                Been here?
++              </p>
++              <p className="guest-cta-text">Sign in to mark it visited and add your rating.</p>
++              <div className="guest-cta-actions">
++                <Link to="/login" state={{ from: '/' }} className="btn btn-primary">
++                  Sign in
++                </Link>
++                <Link to="/register" state={{ from: '/' }} className="btn btn-secondary">
++                  Create account
++                </Link>
++              </div>
++            </section>
++          )}
+ 
+-          <label className="eyebrow">Other logs</label>
+-          <div style={{ marginTop: 8 }}>
+-            {cafe.reviews.length === 0 ? (
+-              <p className="empty-reviews">Nobody else has logged this one yet.</p>
++          <section aria-labelledby="recent-logs">
++            <h3 id="recent-logs" className="sheet-section-title">
++              Recent logs
++            </h3>
++            {loading ? (
++              <div className="log-skeletons">
++                <span className="skeleton" style={{ height: 14, width: '60%' }} />
++                <span className="skeleton" style={{ height: 14, width: '85%' }} />
++              </div>
++            ) : cafe.reviews.length === 0 ? (
++              <p className="empty-note">
++                {cafe.myReview ? 'Yours is the only log so far.' : 'No one else has logged this café yet.'}
++              </p>
+             ) : (
+-              cafe.reviews.map((r) => (
+-                <div className="review-item" key={r.id}>
+-                  <div className="review-item-head">
+-                    <span className="review-item-name">{r.userName}</span>
+-                    <StarRating value={r.rating} readOnly />
+-                  </div>
+-                  {r.text && <p className="review-item-text">{r.text}</p>}
+-                </div>
+-              ))
++              <ul className="log-items">
++                {cafe.reviews.map((r) => (
++                  <li className="log-item" key={r.id}>
++                    <Avatar name={r.userName} username={r.username} size={36} />
++                    <div className="log-item-main">
++                      <div className="log-item-head">
++                        {r.username ? (
++                          <Link to={`/u/${r.username}`} className="log-item-name">
++                            {r.userName}
++                          </Link>
++                        ) : (
++                          <span className="log-item-name">{r.userName}</span>
++                        )}
++                        <BeanRating value={r.rating} readOnly size="sm" />
++                        <time dateTime={r.createdAt}>{timeAgo(r.createdAt)}</time>
++                      </div>
++                      {r.text && <p className="log-item-text">{r.text}</p>}
++                    </div>
++                  </li>
++                ))}
++              </ul>
+             )}
+-          </div>
++          </section>
+         </div>
+       </div>
+     </>
+diff --git a/src/components/CountUp.jsx b/src/components/CountUp.jsx
+new file mode 100644
+index 0000000..434a81e
+--- /dev/null
++++ b/src/components/CountUp.jsx
+@@ -0,0 +1,7 @@
++import { useCountUp } from '../lib/motion.js'
++
++// A number that counts up on first show. Renders a dash when there is nothing to count.
++export default function CountUp({ value, decimals = 0 }) {
++  const shown = useCountUp(typeof value === 'number' ? value : 0, { decimals })
++  return <>{typeof value === 'number' ? shown : '–'}</>
++}
+diff --git a/src/components/Dock.jsx b/src/components/Dock.jsx
+new file mode 100644
+index 0000000..7d91abb
+--- /dev/null
++++ b/src/components/Dock.jsx
+@@ -0,0 +1,42 @@
++import { NavLink, useLocation } from 'react-router-dom'
++import { useAuth } from '../lib/auth.jsx'
++import { LogIcon, MapIcon, UserIcon } from './icons.jsx'
++
++// Floating tab bar. The highlight slides between tabs; its position comes
++// from --slot, so it needs no measuring and no JavaScript animation.
++const HIDDEN_ON = ['/login', '/register', '/forgot-password', '/reset-password']
++
++export default function Dock() {
++  const { user } = useAuth()
++  const { pathname } = useLocation()
++
++  if (HIDDEN_ON.includes(pathname)) return null
++
++  const youPath = user ? `/u/${user.username}` : '/login'
++  const slot = pathname === '/' ? 0 : pathname === '/log' ? 1 : pathname === youPath || pathname === '/settings' ? 2 : -1
++
++  const items = [
++    { to: '/', label: 'Map', icon: <MapIcon />, end: true },
++    { to: '/log', label: 'Log', icon: <LogIcon /> },
++    { to: youPath, label: user ? 'You' : 'Sign in', icon: <UserIcon /> }
++  ]
++
++  return (
++    <nav className="dock" aria-label="Main" style={{ '--slot': Math.max(slot, 0) }}>
++      <span className={`dock-pill${slot < 0 ? ' is-hidden' : ''}`} aria-hidden="true" />
++      {items.map((item, i) => (
++        <NavLink
++          key={item.label}
++          to={item.to}
++          end={item.end}
++          className={`dock-item${slot === i ? ' is-active' : ''}`}
++          // /settings belongs to the "You" tab, so mark it current there too.
++          aria-current={slot === i ? 'page' : undefined}
++        >
++          {item.icon}
++          <span>{item.label}</span>
++        </NavLink>
++      ))}
++    </nav>
++  )
++}
+diff --git a/src/components/Field.jsx b/src/components/Field.jsx
+new file mode 100644
+index 0000000..58002bc
+--- /dev/null
++++ b/src/components/Field.jsx
+@@ -0,0 +1,45 @@
++import { useId, useState } from 'react'
++
++// One labelled form control: text input, password input with a show/hide
++// toggle, or textarea. Errors are announced and tied to the control.
++export default function Field({ label, error, hint, multiline = false, type = 'text', className = '', counter, ...props }) {
++  const id = useId()
++  const [revealed, setRevealed] = useState(false)
++  const isPassword = type === 'password'
++  const describedBy = [error && `${id}-error`, hint && `${id}-hint`].filter(Boolean).join(' ') || undefined
++  const shared = { id, 'aria-invalid': error ? true : undefined, 'aria-describedby': describedBy, ...props }
++
++  return (
++    <div className={`field${error ? ' has-error' : ''} ${className}`}>
++      <label htmlFor={id}>{label}</label>
++      <div className="field-control">
++        {multiline ? (
++          <textarea {...shared} />
++        ) : (
++          <input {...shared} type={isPassword && revealed ? 'text' : type} />
++        )}
++        {isPassword && (
++          <button
++            type="button"
++            className="field-toggle"
++            aria-pressed={revealed}
++            onClick={() => setRevealed((v) => !v)}
++          >
++            {revealed ? 'Hide' : 'Show'}
++          </button>
++        )}
++      </div>
++      {error && (
++        <p className="field-error" id={`${id}-error`} role="alert">
++          {error}
++        </p>
++      )}
++      {hint && !error && (
++        <p className="field-hint" id={`${id}-hint`}>
++          {hint}
++        </p>
++      )}
++      {counter && <p className="field-counter">{counter}</p>}
++    </div>
++  )
++}
+diff --git a/src/components/MapView.jsx b/src/components/MapView.jsx
+index c1b5401..e4d0fc1 100644
+--- a/src/components/MapView.jsx
++++ b/src/components/MapView.jsx
+@@ -1,4 +1,5 @@
+ import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
++import { prefersReducedMotion } from '../lib/motion.js'
+ 
+ const FALLBACK_CENTER = { lat: 40.7128, lng: -74.006 } // used only if geolocation is denied
+ 
+@@ -22,15 +23,15 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
+     }
+   }))
+ 
++  // Roast-brown pins for places you haven't been, leaf green for ones you have.
+   function markerIcon(visited) {
+-    const fill = visited ? '#2f5d50' : '#1f1b16'
+     return {
+       path: 'M0,-9 C5,-9 8,-5.5 8,-1.5 C8,3.5 0,10 0,10 C0,10 -8,3.5 -8,-1.5 C-8,-5.5 -5,-9 0,-9 Z',
+-      fillColor: fill,
++      fillColor: visited ? '#2f7a55' : '#1c1410',
+       fillOpacity: 1,
+-      strokeColor: visited ? '#c08a3e' : '#f7f3ec',
+-      strokeWeight: visited ? 1.5 : 1,
+-      scale: 1.6,
++      strokeColor: '#fafbf8',
++      strokeWeight: 1.6,
++      scale: 1.7,
+       anchor: new google.maps.Point(0, 10)
+     }
+   }
+@@ -44,6 +45,11 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
+         if (status !== google.maps.places.PlacesServiceStatus.OK || !results) return
+ 
+         const seen = new Set()
++        // Pins drop in one after another the first time the map fills up;
++        // after that they simply appear, so panning stays calm.
++        const dropIn = markersRef.current.size === 0 && !prefersReducedMotion()
++        let dropIndex = 0
++
+         results.forEach((place) => {
+           if (!place.place_id || !place.geometry) return
+           seen.add(place.place_id)
+@@ -58,10 +64,16 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
+ 
+           const marker = new google.maps.Marker({
+             position: place.geometry.location,
+-            map: mapRef.current,
++            map: dropIn ? null : mapRef.current,
+             title: place.name,
+-            icon: markerIcon(visited)
++            icon: markerIcon(visited),
++            animation: dropIn ? google.maps.Animation.DROP : null
+           })
++          if (dropIn) {
++            setTimeout(() => {
++              if (markersRef.current.get(place.place_id) === marker) marker.setMap(mapRef.current)
++            }, dropIndex++ * 45)
++          }
+           marker.addListener('click', () => {
+             onCafeClick({
+               placeId: place.place_id,
+@@ -125,16 +137,18 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
+ 
+ export default MapView
+ 
+-// A quiet, low-contrast map theme so the paper/ink UI stays the focal point
+-// rather than default Google Maps blues and greens.
++// A quiet, cool map theme so the pins and the sheet are what you notice.
++// Parks stay faintly visible; businesses and transit are hidden.
+ const MAP_STYLE = [
+-  { elementType: 'geometry', stylers: [{ color: '#f7f3ec' }] },
+-  { elementType: 'labels.text.fill', stylers: [{ color: '#6b6154' }] },
+-  { elementType: 'labels.text.stroke', stylers: [{ color: '#f7f3ec' }] },
++  { elementType: 'geometry', stylers: [{ color: '#e8ebe5' }] },
++  { elementType: 'labels.text.fill', stylers: [{ color: '#5e655f' }] },
++  { elementType: 'labels.text.stroke', stylers: [{ color: '#eef0ea' }] },
+   { featureType: 'poi', stylers: [{ visibility: 'off' }] },
++  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ visibility: 'on' }, { color: '#d9e4d5' }] },
+   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#e1d8c4' }] },
++  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#fafbf8' }] },
++  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#d9ded7' }] },
+   { featureType: 'road', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#dfe3df' }] },
+-  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#d8cdb4' }] }
++  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#cddad8' }] },
++  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#d3d9d0' }] }
+ ]
+diff --git a/src/components/RouteGuards.jsx b/src/components/RouteGuards.jsx
+new file mode 100644
+index 0000000..e983eb6
+--- /dev/null
++++ b/src/components/RouteGuards.jsx
+@@ -0,0 +1,41 @@
++import { Navigate, useLocation } from 'react-router-dom'
++import { useAuth } from '../lib/auth.jsx'
++
++export function PageLoader() {
++  return (
++    <div className="page-loader" role="status" aria-label="Loading">
++      <span className="spinner" />
++    </div>
++  )
++}
++
++// Pages that only make sense for a signed-in person (your log, settings).
++// Guests are sent to sign in and come back to where they were headed.
++export function RequireAuth({ children, reason }) {
++  const { user } = useAuth()
++  const location = useLocation()
++
++  if (user === undefined) return <PageLoader />
++  if (!user) {
++    return <Navigate to="/login" replace state={{ from: location.pathname + location.search, reason }} />
++  }
++  return children
++}
++
++// Sign in and create account only make sense for guests. Someone who is
++// already signed in goes straight to where they were headed, or the map.
++export function GuestOnly({ children }) {
++  const { user } = useAuth()
++  const location = useLocation()
++
++  if (user === undefined) return <PageLoader />
++  if (user) return <Navigate to={location.state?.from ?? '/'} replace />
++  return children
++}
++
++// The old /profile tab now lives at /u/<username>.
++export function ProfileRedirect() {
++  const { user } = useAuth()
++  if (user === undefined) return <PageLoader />
++  return <Navigate to={user ? `/u/${user.username}` : '/login'} replace state={{ from: '/profile' }} />
++}
+diff --git a/src/components/SearchBar.jsx b/src/components/SearchBar.jsx
+index 3cda5cc..58c6634 100644
+--- a/src/components/SearchBar.jsx
++++ b/src/components/SearchBar.jsx
+@@ -1,8 +1,11 @@
+ import { useEffect, useRef } from 'react'
++import { SearchIcon } from './icons.jsx'
+ 
+ export default function SearchBar({ google, map, onPlaceSelected }) {
+   const inputRef = useRef(null)
+   const autocompleteRef = useRef(null)
++  const onPlaceSelectedRef = useRef(onPlaceSelected)
++  onPlaceSelectedRef.current = onPlaceSelected
+ 
+   useEffect(() => {
+     if (!google || !inputRef.current || autocompleteRef.current) return
+@@ -17,7 +20,7 @@ export default function SearchBar({ google, map, onPlaceSelected }) {
+     autocomplete.addListener('place_changed', () => {
+       const place = autocomplete.getPlace()
+       if (!place.geometry) return
+-      onPlaceSelected({
++      onPlaceSelectedRef.current({
+         placeId: place.place_id,
+         name: place.name,
+         address: place.formatted_address,
+@@ -29,15 +32,18 @@ export default function SearchBar({ google, map, onPlaceSelected }) {
+     })
+ 
+     autocompleteRef.current = autocomplete
+-  }, [google, map, onPlaceSelected])
++  }, [google, map])
+ 
+   return (
+     <div className="search-bar">
+-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+-        <circle cx="11" cy="11" r="7" />
+-        <path d="m20 20-3.5-3.5" strokeLinecap="round" />
+-      </svg>
+-      <input ref={inputRef} type="text" placeholder="Search coffee shops" autoComplete="off" />
++      <SearchIcon />
++      <input
++        ref={inputRef}
++        type="text"
++        placeholder="Search coffee shops"
++        aria-label="Search coffee shops"
++        autoComplete="off"
++      />
+     </div>
+   )
+ }
+diff --git a/src/components/StampBadge.jsx b/src/components/StampBadge.jsx
+index 4fd2595..c84c80c 100644
+--- a/src/components/StampBadge.jsx
++++ b/src/components/StampBadge.jsx
+@@ -1,19 +1,20 @@
+-// The signature element: a hand-stamped-looking ring, used wherever a cafe
+-// is marked as visited (sheet header, log entries). Deliberately imperfect —
+-// a wobble on the ring path — to read as "stamped", not "generated".
+-export default function StampBadge({ size = 52 }) {
++// The "visited" mark: a rubber-stamped ring with a cup in the middle. The
++// outline wobbles on purpose so it reads as stamped, not generated. Pass
++// `press` right after someone marks a café visited to play the stamp-down.
++export default function StampBadge({ size = 52, press = false }) {
+   return (
+-    <div className="stamp-badge" style={{ width: size, height: size }}>
+-      <svg viewBox="0 0 100 100" fill="none">
++    <div className={`stamp-badge${press ? ' is-pressing' : ''}`} style={{ width: size, height: size }} aria-label="Visited" role="img">
++      <svg viewBox="0 0 100 100" fill="none" aria-hidden="true">
+         <path
++          className="stamp-ring"
+           d="M50 6c5 0 6 4 11 5s8-2 12 1 2 8 6 11 6 2 6 8-4 6-5 11 2 8-1 12-8 2-11 6-2 6-8 6-6-4-11-5-8 2-12-1-2-8-6-11-6-2-6-8 4-6 5-11-2-8 1-12 8-2 11-6 2-6 8-6Z"
+-          stroke="var(--gold)"
+-          strokeWidth="1.6"
++          stroke="currentColor"
++          strokeWidth="2.2"
+           strokeLinejoin="round"
+         />
+-        <circle cx="50" cy="50" r="32" stroke="var(--gold)" strokeWidth="1" opacity="0.6" />
+-        <g stroke="var(--stamp)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" fill="none">
+-          <rect x="36" y="42" width="22" height="20" rx="2" />
++        <circle cx="50" cy="50" r="32" stroke="currentColor" strokeWidth="1.2" opacity="0.45" />
++        <g stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" fill="none">
++          <rect x="36" y="42" width="22" height="20" rx="3" />
+           <path d="M58 46c5 0 8 2.4 8 6s-3 6-8 6" />
+           <path d="M40 34l3-5M47 34l3-5M54 34l3-5" />
+         </g>
+diff --git a/src/components/StarRating.jsx b/src/components/StarRating.jsx
+deleted file mode 100644
+index 7bfaa17..0000000
+--- a/src/components/StarRating.jsx
++++ /dev/null
+@@ -1,38 +0,0 @@
+-const Star = ({ filled }) => (
+-  <svg viewBox="0 0 24 24" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.5">
+-    <path
+-      d="M12 3.5l2.6 5.4 5.9.8-4.3 4.2 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.7l5.9-.8L12 3.5Z"
+-      strokeLinejoin="round"
+-    />
+-  </svg>
+-)
+-
+-export default function StarRating({ value = 0, onChange, readOnly = false }) {
+-  if (readOnly) {
+-    return (
+-      <span className="star-rating readonly">
+-        {[1, 2, 3, 4, 5].map((n) => (
+-          <span key={n} className={n <= value ? 'filled' : ''}>
+-            <Star filled={n <= value} />
+-          </span>
+-        ))}
+-      </span>
+-    )
+-  }
+-
+-  return (
+-    <span className="star-rating">
+-      {[1, 2, 3, 4, 5].map((n) => (
+-        <button
+-          key={n}
+-          type="button"
+-          className={n <= value ? 'filled' : ''}
+-          aria-label={`Rate ${n} star${n > 1 ? 's' : ''}`}
+-          onClick={() => onChange(n)}
+-        >
+-          <Star filled={n <= value} />
+-        </button>
+-      ))}
+-    </span>
+-  )
+-}
+diff --git a/src/components/Stats.jsx b/src/components/Stats.jsx
+new file mode 100644
+index 0000000..287fb61
+--- /dev/null
++++ b/src/components/Stats.jsx
+@@ -0,0 +1,18 @@
++import CountUp from './CountUp.jsx'
++
++// Labels come first in the markup (so the list reads "Visited, 12") and are
++// shown below the numbers with CSS.
++export default function Stats({ items }) {
++  return (
++    <dl className="stats">
++      {items.map(({ label, value, decimals }) => (
++        <div key={label}>
++          <dt>{label}</dt>
++          <dd>
++            <CountUp value={value} decimals={decimals} />
++          </dd>
++        </div>
++      ))}
++    </dl>
++  )
++}
+diff --git a/src/components/icons.jsx b/src/components/icons.jsx
+new file mode 100644
+index 0000000..c93107c
+--- /dev/null
++++ b/src/components/icons.jsx
+@@ -0,0 +1,85 @@
++// Small inline icon set. All use currentColor so they follow the text color.
++
++const base = {
++  viewBox: '0 0 24 24',
++  fill: 'none',
++  stroke: 'currentColor',
++  strokeWidth: 1.7,
++  strokeLinecap: 'round',
++  strokeLinejoin: 'round',
++  'aria-hidden': true,
++  focusable: false
++}
++
++export const MapIcon = (props) => (
++  <svg {...base} {...props}>
++    <path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2Z" />
++    <path d="M9 4v14M15 6v14" />
++  </svg>
++)
++
++export const LogIcon = (props) => (
++  <svg {...base} {...props}>
++    <rect x="4.5" y="3" width="15" height="18" rx="3" />
++    <path d="M8.5 8h7M8.5 12h7M8.5 16h4" />
++  </svg>
++)
++
++export const UserIcon = (props) => (
++  <svg {...base} {...props}>
++    <circle cx="12" cy="8" r="3.6" />
++    <path d="M5 20c1.3-3.7 4.1-5.6 7-5.6s5.7 1.9 7 5.6" />
++  </svg>
++)
++
++export const SearchIcon = (props) => (
++  <svg {...base} {...props}>
++    <circle cx="11" cy="11" r="6.5" />
++    <path d="m20 20-3.9-3.9" />
++  </svg>
++)
++
++export const LocateIcon = (props) => (
++  <svg {...base} {...props}>
++    <circle cx="12" cy="12" r="3.2" />
++    <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" />
++  </svg>
++)
++
++export const CheckIcon = (props) => (
++  <svg {...base} strokeWidth={2.2} {...props}>
++    <path d="m5 12.5 4.2 4.2L19 7" />
++  </svg>
++)
++
++export const PlusIcon = (props) => (
++  <svg {...base} strokeWidth={2} {...props}>
++    <path d="M12 5v14M5 12h14" />
++  </svg>
++)
++
++export const GearIcon = (props) => (
++  <svg {...base} {...props}>
++    <circle cx="12" cy="12" r="3" />
++    <path d="M12 2.8v2.4M12 18.8v2.4M4.3 7.4l2.1 1.2M17.6 15.4l2.1 1.2M4.3 16.6l2.1-1.2M17.6 8.6l2.1-1.2" />
++  </svg>
++)
++
++export const ChevronIcon = (props) => (
++  <svg {...base} {...props}>
++    <path d="m9 6 6 6-6 6" />
++  </svg>
++)
++
++export const BackIcon = (props) => (
++  <svg {...base} {...props}>
++    <path d="M15 6l-6 6 6 6" />
++  </svg>
++)
++
++export const LockIcon = (props) => (
++  <svg {...base} {...props}>
++    <rect x="5" y="10.5" width="14" height="9.5" rx="3" />
++    <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
++  </svg>
++)
+diff --git a/src/index.css b/src/index.css
+index ba569e1..c17a5a0 100644
+--- a/src/index.css
++++ b/src/index.css
+@@ -1,31 +1,48 @@
++/* CaféFinds
++   Ceramic ground, roast-brown ink, cherry for actions, leaf green for "visited",
++   and one variable typeface (Bricolage Grotesque) set heavy and narrow for
++   display, regular for text. Ratings are coffee beans.
++   Motion is kept for moments the person causes: rating, marking visited,
++   opening and dragging the sheet, switching tabs. The one loop is the steam
++   on the sign-in screens. */
++
+ :root {
+-  /* Color: a coffee-shop ledger, not a coffee-bag label. Paper, ink, and a
+-     single stamp-ink green for "visited", brass for rating marks. */
+-  --paper: #f7f3ec;
+-  --paper-dim: #efe9dc;
+-  --ink: #1f1b16;
+-  --ink-soft: #6b6154;
+-  --line: #e1d8c4;
+-  --stamp: #2f5d50;
+-  --stamp-soft: #e4ece9;
+-  --gold: #c08a3e;
+-  --danger: #a4402f;
+-
+-  --font-display: 'Fraunces', Georgia, serif;
+-  --font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+-  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+-
+-  --radius: 14px;
+-  --radius-sm: 8px;
+-  --nav-h: 64px;
++  --ceramic: #ebeee9;
++  --porcelain: #fafbf8;
++  --roast: #1c1410;
++  --bean: #7b4b2f;
++  --bean-empty: #c3c9c0;
++  --cherry: #d2303f;
++  --cherry-deep: #b3202f;
++  --leaf: #2f7a55;
++  --leaf-soft: #dfeee5;
++  --soft: #5e655f;
++  --line: #d9ded7;
++  --danger: #b3202f;
++  --danger-soft: #fbe8ea;
++
++  --font: 'Bricolage Grotesque', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
++
++  --r-sheet: 28px;
++  --r-card: 20px;
++  --r-field: 14px;
++
++  --shadow-card: 0 1px 2px rgb(28 20 16 / 0.06), 0 6px 18px -8px rgb(28 20 16 / 0.14);
++  --shadow-float: 0 1px 2px rgb(28 20 16 / 0.1), 0 10px 28px -8px rgb(28 20 16 / 0.28);
++
++  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
++  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
++
+   --safe-top: env(safe-area-inset-top, 0px);
+   --safe-bottom: env(safe-area-inset-bottom, 0px);
++  --dock-space: calc(58px + 14px + var(--safe-bottom));
+ 
+   color-scheme: light;
+ }
+ 
+ * {
+   box-sizing: border-box;
++  -webkit-tap-highlight-color: transparent;
+ }
+ 
+ html,
+@@ -36,135 +53,201 @@ body,
+ 
+ body {
+   margin: 0;
+-  background: var(--paper);
+-  color: var(--ink);
+-  font-family: var(--font-body);
+-  font-size: 15px;
++  background: var(--ceramic);
++  color: var(--roast);
++  font-family: var(--font);
++  font-optical-sizing: auto;
++  font-size: 16px;
+   line-height: 1.45;
+   -webkit-font-smoothing: antialiased;
++  text-rendering: optimizeLegibility;
+   overscroll-behavior-y: none;
+ }
+ 
+ h1,
+ h2,
+-h3 {
+-  font-family: var(--font-display);
+-  font-weight: 600;
+-  margin: 0;
+-  letter-spacing: -0.01em;
+-}
+-
+-p {
++h3,
++p,
++dl,
++dd,
++ol,
++ul {
+   margin: 0;
+ }
+ 
+-button {
+-  font-family: inherit;
+-  cursor: pointer;
++h1,
++h2,
++h3 {
++  font-weight: 750;
++  line-height: 1.1;
++  letter-spacing: -0.02em;
+ }
+ 
++button,
+ input,
+ textarea {
+-  font-family: inherit;
+-  font-size: inherit;
++  font: inherit;
++  color: inherit;
++}
++
++button {
++  cursor: pointer;
+ }
+ 
+ a {
+   color: inherit;
+ }
+ 
+-/* App shell -------------------------------------------------- */
++code {
++  font-size: 0.9em;
++  background: rgb(28 20 16 / 0.07);
++  padding: 1px 6px;
++  border-radius: 6px;
++}
++
++:focus-visible {
++  outline: 2.5px solid var(--cherry);
++  outline-offset: 2px;
++}
++
++/* App shell ----------------------------------------------------------- */
+ 
+ .app-shell {
++  position: relative;
+   height: 100dvh;
+-  display: flex;
+-  flex-direction: column;
+   max-width: 560px;
+   margin: 0 auto;
+-  position: relative;
+-  background: var(--paper);
++  display: flex;
++  flex-direction: column;
++  background: var(--ceramic);
++  overflow: hidden;
+ }
+ 
+ .app-main {
++  position: relative;
+   flex: 1;
+   min-height: 0;
+-  position: relative;
+ }
+ 
+-/* Bottom nav: a ticket-stub tab bar with a dashed perforation edge -------- */
++.page {
++  flex: 1;
++  min-height: 0;
++  overflow-y: auto;
++  -webkit-overflow-scrolling: touch;
++  padding: calc(22px + var(--safe-top)) 20px calc(var(--dock-space) + 28px);
++}
++
++@media (min-width: 600px) {
++  body {
++    background: #dde2da;
++  }
++  .app-shell {
++    box-shadow: 0 0 0 1px var(--line), 0 20px 60px -20px rgb(28 20 16 / 0.3);
++  }
++}
++
++/* Page titles: heavy and narrow, the one loud thing in the type system. */
+ 
+-.bottom-nav {
+-  position: relative;
+-  display: flex;
+-  height: calc(var(--nav-h) + var(--safe-bottom));
+-  padding-bottom: var(--safe-bottom);
+-  background: var(--ink);
+-  z-index: 20;
++.page-head {
++  margin-bottom: 20px;
+ }
+ 
+-.bottom-nav::before {
+-  content: '';
+-  position: absolute;
+-  top: 0;
+-  left: 0;
+-  right: 0;
+-  height: 1px;
+-  background-image: linear-gradient(to right, var(--paper) 50%, transparent 0%);
+-  background-size: 8px 1px;
+-  opacity: 0.25;
++.page-head h1 {
++  font-size: 42px;
++  font-weight: 800;
++  font-stretch: 78%;
++  letter-spacing: -0.035em;
++  line-height: 1;
+ }
+ 
+-.nav-item {
+-  flex: 1;
+-  display: flex;
+-  flex-direction: column;
++.back-link {
++  display: inline-flex;
+   align-items: center;
+-  justify-content: center;
+-  gap: 4px;
+-  background: none;
+-  border: none;
+-  color: var(--paper-dim);
+-  opacity: 0.55;
+-  font-family: var(--font-mono);
+-  font-size: 11px;
+-  letter-spacing: 0.04em;
+-  text-transform: uppercase;
+-  transition: opacity 0.15s ease;
++  gap: 2px;
++  min-height: 44px;
++  margin: 0 0 4px -6px;
++  padding: 0 8px 0 2px;
++  color: var(--soft);
++  font-weight: 600;
++  text-decoration: none;
+ }
+ 
+-.nav-item.active {
+-  opacity: 1;
+-  color: var(--paper);
++.back-link svg {
++  width: 20px;
++  height: 20px;
+ }
+ 
+-.nav-item svg {
+-  width: 22px;
+-  height: 22px;
++.section-title {
++  font-size: 22px;
++  margin-bottom: 14px;
+ }
+ 
+-/* Top bar ------------------------------------------------------ */
++/* Dock ------------------------------------------------------------------ */
+ 
+-.top-bar {
++.dock {
++  position: absolute;
++  left: 50%;
++  bottom: calc(14px + var(--safe-bottom));
++  z-index: 20;
++  width: min(300px, calc(100% - 40px));
++  height: 58px;
++  padding: 5px;
++  display: grid;
++  grid-template-columns: repeat(3, 1fr);
++  transform: translateX(-50%);
++  border-radius: 999px;
++  background: rgb(250 251 248 / 0.82);
++  -webkit-backdrop-filter: blur(16px) saturate(1.5);
++  backdrop-filter: blur(16px) saturate(1.5);
++  box-shadow: var(--shadow-float), inset 0 0 0 1px rgb(255 255 255 / 0.6);
++}
++
++.dock-pill {
++  position: absolute;
++  top: 5px;
++  bottom: 5px;
++  left: 5px;
++  width: calc((100% - 10px) / 3);
++  border-radius: 999px;
++  background: var(--roast);
++  transform: translateX(calc(var(--slot, 0) * 100%));
++  transition: transform 0.45s var(--ease-spring), opacity 0.2s ease;
++}
++
++.dock-pill.is-hidden {
++  opacity: 0;
++}
++
++.dock-item {
++  position: relative;
++  z-index: 1;
+   display: flex;
++  flex-direction: column;
+   align-items: center;
+-  justify-content: space-between;
+-  gap: 12px;
+-  padding: calc(14px + var(--safe-top)) 16px 12px;
++  justify-content: center;
++  gap: 1px;
++  color: var(--soft);
++  font-size: 12px;
++  font-weight: 600;
++  text-decoration: none;
++  transition: color 0.25s ease;
+ }
+ 
+-.top-bar h1 {
+-  font-size: 20px;
++.dock-item svg {
++  width: 22px;
++  height: 22px;
+ }
+ 
+-.eyebrow {
+-  font-family: var(--font-mono);
+-  font-size: 11px;
+-  text-transform: uppercase;
+-  letter-spacing: 0.08em;
+-  color: var(--ink-soft);
++.dock-item.is-active {
++  color: var(--porcelain);
+ }
+ 
+-/* Search bar ----------------------------------------------------- */
++/* Map ---------------------------------------------------------------------- */
++
++.map-canvas {
++  position: absolute;
++  inset: 0;
++}
+ 
+ .search-bar {
+   position: absolute;
+@@ -174,77 +257,104 @@ a {
+   z-index: 10;
+   display: flex;
+   align-items: center;
+-  gap: 8px;
+-  background: var(--paper);
+-  border: 1px solid var(--line);
++  gap: 10px;
++  height: 52px;
++  padding: 0 18px;
+   border-radius: 999px;
+-  padding: 11px 16px;
+-  box-shadow: 0 4px 14px rgba(31, 27, 22, 0.12);
+-}
+-
+-.search-bar input {
+-  flex: 1;
+-  border: none;
+-  background: none;
+-  outline: none;
+-  font-size: 15px;
+-  color: var(--ink);
++  background: rgb(250 251 248 / 0.88);
++  -webkit-backdrop-filter: blur(14px) saturate(1.4);
++  backdrop-filter: blur(14px) saturate(1.4);
++  box-shadow: var(--shadow-float), inset 0 0 0 1px rgb(255 255 255 / 0.6);
++  transition: box-shadow 0.2s ease;
+ }
+ 
+-.search-bar input::placeholder {
+-  color: var(--ink-soft);
++.search-bar:focus-within {
++  box-shadow: var(--shadow-float), 0 0 0 3px rgb(210 48 63 / 0.3);
+ }
+ 
+ .search-bar svg {
+-  width: 18px;
+-  height: 18px;
+-  color: var(--ink-soft);
++  width: 20px;
++  height: 20px;
+   flex-shrink: 0;
++  color: var(--soft);
+ }
+ 
+-/* Map ------------------------------------------------------------ */
+-
+-.map-canvas {
+-  width: 100%;
++.search-bar input {
++  flex: 1;
++  min-width: 0;
+   height: 100%;
++  border: 0;
++  outline: 0;
++  background: none;
++  font-size: 16px;
++  font-weight: 500;
++}
++
++.search-bar input::placeholder {
++  color: var(--soft);
+ }
+ 
+ .locate-btn {
+   position: absolute;
+   right: 14px;
+-  bottom: 14px;
+-  width: 44px;
+-  height: 44px;
+-  border-radius: 50%;
+-  background: var(--ink);
+-  color: var(--paper);
+-  border: none;
+-  display: flex;
+-  align-items: center;
+-  justify-content: center;
+-  box-shadow: 0 4px 14px rgba(31, 27, 22, 0.25);
++  bottom: calc(var(--dock-space) + 14px);
+   z-index: 10;
++  width: 48px;
++  height: 48px;
++  display: grid;
++  place-items: center;
++  border: 0;
++  border-radius: 50%;
++  background: var(--porcelain);
++  color: var(--roast);
++  box-shadow: var(--shadow-float);
++  transition: transform 0.15s var(--ease-spring);
++}
++
++.locate-btn:active {
++  transform: scale(0.92);
+ }
+ 
+ .locate-btn svg {
+-  width: 20px;
+-  height: 20px;
++  width: 22px;
++  height: 22px;
++}
++
++/* Google's autocomplete dropdown, matched to the app */
++.pac-container {
++  z-index: 40;
++  margin-top: 8px;
++  border: 0;
++  border-radius: var(--r-card);
++  overflow: hidden;
++  font-family: var(--font);
++  box-shadow: var(--shadow-float);
++}
++
++.pac-item {
++  padding: 8px 18px;
++  border-top: 1px solid var(--line);
++  font-size: 14px;
++  color: var(--soft);
++}
++
++.pac-item-query {
++  font-size: 15px;
++  color: var(--roast);
+ }
+ 
+-/* Bottom sheet ----------------------------------------------------- */
++/* Café sheet -------------------------------------------------------------- */
+ 
+ .sheet-backdrop {
+   position: absolute;
+   inset: 0;
+-  background: rgba(31, 27, 22, 0.28);
+-  z-index: 15;
+-  animation: fade-in 0.15s ease;
++  z-index: 30;
++  background: rgb(28 20 16 / 0.34);
++  animation: fade-in 0.2s ease-out;
+ }
+ 
+-@keyframes fade-in {
+-  from {
+-    opacity: 0;
+-  }
++.sheet-backdrop.is-closing {
++  animation: fade-out 0.2s ease-in forwards;
+ }
+ 
+ .sheet {
+@@ -252,387 +362,1170 @@ a {
+   left: 0;
+   right: 0;
+   bottom: 0;
+-  z-index: 16;
+-  background: var(--paper);
+-  border-radius: 20px 20px 0 0;
+-  max-height: 82%;
++  z-index: 31;
+   display: flex;
+   flex-direction: column;
+-  box-shadow: 0 -8px 28px rgba(31, 27, 22, 0.22);
+-  animation: sheet-up 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
++  max-height: 88%;
+   padding-bottom: var(--safe-bottom);
++  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
++  background: var(--porcelain);
++  box-shadow: 0 -10px 40px rgb(28 20 16 / 0.24);
++  outline: 0;
++  transition: transform 0.35s var(--ease-out);
++  animation: sheet-in 0.45s var(--ease-out);
+ }
+ 
+-@keyframes sheet-up {
+-  from {
+-    transform: translateY(16px);
+-    opacity: 0;
+-  }
++.sheet.is-closing {
++  animation: sheet-out 0.2s ease-in forwards;
++}
++
++.sheet-grab {
++  flex-shrink: 0;
++  display: flex;
++  justify-content: center;
++  padding: 12px 0 8px;
++  cursor: grab;
++  touch-action: none;
+ }
+ 
+ .sheet-handle {
+-  width: 36px;
+-  height: 4px;
+-  border-radius: 2px;
++  width: 40px;
++  height: 5px;
++  border-radius: 3px;
+   background: var(--line);
+-  margin: 10px auto 4px;
+-  flex-shrink: 0;
+ }
+ 
+ .sheet-body {
+   overflow-y: auto;
+-  padding: 4px 20px 24px;
++  overscroll-behavior: contain;
++  padding: 2px 22px 30px;
+ }
+ 
+ .sheet-header {
+   display: flex;
+   align-items: flex-start;
+   justify-content: space-between;
+-  gap: 12px;
+-  padding-top: 10px;
++  gap: 14px;
+ }
+ 
+-.sheet-header h2 {
+-  font-size: 21px;
+-  line-height: 1.2;
++.sheet-title {
++  min-width: 0;
++}
++
++.sheet-title h2 {
++  font-size: 30px;
++  font-weight: 800;
++  font-stretch: 80%;
++  letter-spacing: -0.03em;
++  line-height: 1.02;
++  overflow-wrap: anywhere;
+ }
+ 
+ .sheet-address {
+-  color: var(--ink-soft);
+-  font-size: 13px;
+-  margin-top: 4px;
++  margin-top: 6px;
++  color: var(--soft);
++  font-size: 14.5px;
+ }
+ 
+-.sheet-meta {
++.sheet-rating {
+   display: flex;
+   align-items: center;
+   gap: 10px;
+-  margin-top: 10px;
+-  font-family: var(--font-mono);
+-  font-size: 12.5px;
+-  color: var(--ink-soft);
+-}
+-
+-.divider {
+-  height: 1px;
+-  background: var(--line);
+-  margin: 16px 0;
++  min-height: 28px;
++  margin: 14px 0 20px;
++  color: var(--soft);
++  font-size: 14.5px;
+ }
+ 
+-/* Stamp badge — the signature element: a rubber-stamped "visited" mark ---- */
+-
+-.stamp-badge {
+-  flex-shrink: 0;
+-  width: 52px;
+-  height: 52px;
+-  display: flex;
+-  align-items: center;
+-  justify-content: center;
++.sheet-score {
++  color: var(--roast);
++  font-size: 24px;
++  font-weight: 800;
++  font-stretch: 85%;
++  font-variant-numeric: tabular-nums;
++  letter-spacing: -0.02em;
+ }
+ 
+-.stamp-badge svg {
+-  width: 100%;
+-  height: 100%;
++.sheet-section-title {
++  margin: 28px 0 6px;
++  font-size: 19px;
+ }
+ 
+-/* Visited toggle (checklist) --------------------------------------- */
++/* Visited toggle */
+ 
+ .visit-toggle {
+   display: flex;
+   align-items: center;
++  justify-content: center;
+   gap: 10px;
+   width: 100%;
+-  padding: 13px 16px;
+-  border-radius: var(--radius);
+-  border: 1.5px solid var(--ink);
+-  background: var(--ink);
+-  color: var(--paper);
+-  font-weight: 500;
+-  font-size: 14.5px;
+-  justify-content: center;
+-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
++  min-height: 54px;
++  border: 0;
++  border-radius: 999px;
++  background: var(--roast);
++  color: var(--porcelain);
++  font-size: 16px;
++  font-weight: 650;
++  transition: background-color 0.25s ease, color 0.25s ease, transform 0.15s var(--ease-spring),
++    box-shadow 0.25s ease;
+ }
+ 
+-.visit-toggle.is-visited {
+-  background: var(--stamp-soft);
+-  color: var(--stamp);
+-  border-color: var(--stamp);
++.visit-toggle:active:not(:disabled) {
++  transform: scale(0.98);
+ }
+ 
+-.visit-toggle svg {
+-  width: 18px;
+-  height: 18px;
++.visit-toggle:disabled {
++  opacity: 0.6;
+ }
+ 
+-/* Star rating --------------------------------------------------------- */
+-
+-.star-rating {
+-  display: inline-flex;
+-  gap: 3px;
++.visit-toggle svg {
++  width: 20px;
++  height: 20px;
+ }
+ 
+-.star-rating button {
+-  background: none;
+-  border: none;
+-  padding: 2px;
+-  color: var(--line);
++.visit-toggle.is-visited {
++  background: var(--leaf-soft);
++  color: var(--leaf);
++  box-shadow: inset 0 0 0 1.5px var(--leaf);
+ }
+ 
+-.star-rating button.filled,
+-.star-rating.readonly span.filled {
+-  color: var(--gold);
++.visit-toggle.is-visited svg {
++  animation: check-pop 0.4s var(--ease-spring);
+ }
+ 
+-.star-rating svg {
+-  width: 22px;
+-  height: 22px;
+-}
++/* Stamp: the "visited" mark */
+ 
+-.star-rating.readonly svg {
+-  width: 14px;
+-  height: 14px;
++.stamp-badge {
++  position: relative;
++  flex-shrink: 0;
++  color: var(--leaf);
++  transform: rotate(-8deg);
+ }
+ 
+-/* Review form / list --------------------------------------------------- */
+-
+-.review-form textarea {
++.stamp-badge svg {
++  display: block;
+   width: 100%;
+-  border: 1px solid var(--line);
+-  border-radius: var(--radius-sm);
+-  padding: 10px 12px;
+-  resize: none;
+-  min-height: 64px;
+-  outline: none;
+-  background: #fff;
+-  margin-top: 10px;
++  height: 100%;
+ }
+ 
+-.review-form textarea:focus {
+-  border-color: var(--ink-soft);
++.stamp-badge.is-pressing {
++  animation: stamp-press 0.6s var(--ease-out);
+ }
+ 
+-.btn-primary {
+-  margin-top: 10px;
+-  width: 100%;
+-  padding: 12px;
+-  border-radius: var(--radius-sm);
+-  border: none;
+-  background: var(--stamp);
+-  color: #fff;
+-  font-weight: 500;
+-  font-size: 14px;
++.stamp-badge.is-pressing::after {
++  content: '';
++  position: absolute;
++  inset: 0;
++  border-radius: 50%;
++  border: 2px solid currentColor;
++  animation: stamp-ripple 0.7s 0.18s ease-out both;
+ }
+ 
+-.btn-primary:disabled {
+-  opacity: 0.45;
++/* Your log (rating + notes) */
++
++.log-form {
++  margin-top: 16px;
++  padding: 18px;
++  border-radius: var(--r-card);
++  background: var(--ceramic);
+ }
+ 
+-.btn-text {
+-  background: none;
+-  border: none;
+-  color: var(--danger);
+-  font-size: 13px;
+-  padding: 8px 0;
++.log-form h3 {
++  margin-bottom: 12px;
++  font-size: 19px;
+ }
+ 
+-.review-item {
+-  padding: 12px 0;
+-  border-top: 1px solid var(--line);
++.log-form textarea {
++  width: 100%;
++  min-height: 92px;
++  margin-top: 14px;
++  padding: 13px 15px;
++  border: 1.5px solid transparent;
++  border-radius: var(--r-field);
++  background: var(--porcelain);
++  font-size: 16px;
++  line-height: 1.45;
++  resize: none;
++  outline: 0;
++  transition: border-color 0.2s ease, box-shadow 0.2s ease;
++}
++
++.log-form textarea::placeholder {
++  color: var(--soft);
+ }
+ 
+-.review-item:first-child {
+-  border-top: none;
++.log-form textarea:focus {
++  border-color: var(--roast);
++  box-shadow: 0 0 0 4px rgb(210 48 63 / 0.16);
+ }
+ 
+-.review-item-head {
++.log-actions {
+   display: flex;
+   align-items: center;
+-  justify-content: space-between;
++  gap: 8px;
++  margin-top: 14px;
+ }
+ 
+-.review-item-name {
+-  font-weight: 500;
+-  font-size: 13.5px;
++.log-actions .btn-primary {
++  flex: 1;
+ }
+ 
+-.review-item-text {
+-  margin-top: 6px;
+-  font-size: 13.5px;
+-  color: #3a342c;
++.guest-cta {
++  margin-top: 18px;
++  padding: 20px;
++  border-radius: var(--r-card);
++  background: var(--ceramic);
+ }
+ 
+-.empty-reviews {
+-  color: var(--ink-soft);
+-  font-size: 13.5px;
+-  padding: 8px 0 4px;
++.guest-cta-title {
++  font-size: 22px;
++  font-weight: 800;
++  font-stretch: 85%;
++  letter-spacing: -0.02em;
+ }
+ 
+-/* Log page (the diary) -------------------------------------------------- */
+-
+-.page {
+-  flex: 1;
+-  min-height: 0;
+-  overflow-y: auto;
+-  -webkit-overflow-scrolling: touch;
++.guest-cta-text {
++  margin: 6px 0 16px;
++  color: var(--soft);
+ }
+ 
+-.log-list {
+-  padding: 0 16px 24px;
++.guest-cta-actions {
+   display: flex;
+-  flex-direction: column;
++  flex-wrap: wrap;
+   gap: 10px;
+ }
+ 
+-.log-entry {
++.guest-cta-actions .btn {
++  flex: 1 1 140px;
++}
++
++/* Logs from other people */
++
++.log-items {
++  padding: 0;
++  list-style: none;
++}
++
++.log-item {
+   display: flex;
+   gap: 12px;
+-  align-items: center;
+-  padding: 12px 14px;
+-  background: #fff;
+-  border: 1px solid var(--line);
+-  border-radius: var(--radius);
++  padding: 16px 0;
++  border-top: 1.5px solid var(--line);
+ }
+ 
+-.log-entry .stamp-badge {
+-  width: 38px;
+-  height: 38px;
++.log-item:first-child {
++  border-top: 0;
+ }
+ 
+-.log-entry-main {
++.log-item-main {
+   flex: 1;
+   min-width: 0;
+ }
+ 
+-.log-entry-main h3 {
+-  font-size: 15px;
+-  font-weight: 500;
+-  font-family: var(--font-body);
+-  white-space: nowrap;
+-  overflow: hidden;
+-  text-overflow: ellipsis;
+-}
+-
+-.log-entry-meta {
++.log-item-head {
+   display: flex;
++  flex-wrap: wrap;
+   align-items: center;
+-  gap: 8px;
+-  margin-top: 3px;
+-  font-size: 12px;
+-  color: var(--ink-soft);
+-  font-family: var(--font-mono);
++  gap: 4px 10px;
+ }
+ 
+-.log-empty {
+-  padding: 60px 32px;
+-  text-align: center;
+-  color: var(--ink-soft);
++.log-item-name {
++  font-weight: 650;
++  text-decoration: none;
+ }
+ 
+-.log-empty h3 {
+-  color: var(--ink);
+-  font-size: 18px;
+-  margin-bottom: 8px;
++a.log-item-name:hover {
++  text-decoration: underline;
+ }
+ 
+-.stat-row {
++.log-item-head time {
++  margin-left: auto;
++  color: var(--soft);
++  font-size: 13px;
++}
++
++.log-item-text {
++  margin-top: 6px;
++  font-size: 15px;
++  line-height: 1.5;
++  overflow-wrap: anywhere;
++}
++
++.empty-note {
++  padding: 8px 0 0;
++  color: var(--soft);
++}
++
++.log-skeletons {
+   display: flex;
++  flex-direction: column;
+   gap: 10px;
+-  padding: 0 16px 18px;
++  padding-top: 12px;
+ }
+ 
+-.stat-card {
+-  flex: 1;
+-  background: #fff;
+-  border: 1px solid var(--line);
+-  border-radius: var(--radius);
+-  padding: 14px 12px;
+-  text-align: center;
++/* Beans ---------------------------------------------------------------------- */
++
++.beans {
++  display: inline-flex;
++  gap: 2px;
++  vertical-align: middle;
+ }
+ 
+-.stat-card .num {
+-  font-family: var(--font-mono);
+-  font-size: 22px;
+-  font-weight: 500;
++.bean {
++  --c: var(--bean-empty);
++  display: inline-grid;
++  place-items: center;
++  padding: 0;
++  border: 0;
++  background: none;
++  line-height: 0;
+ }
+ 
+-.stat-card .label {
+-  font-size: 11px;
+-  text-transform: uppercase;
+-  letter-spacing: 0.06em;
+-  color: var(--ink-soft);
+-  margin-top: 2px;
++.bean.is-on {
++  --c: var(--bean);
+ }
+ 
+-/* Profile ---------------------------------------------------------------- */
++.bean svg {
++  display: block;
++  width: 100%;
++  height: 100%;
++  overflow: visible;
++}
+ 
+-.profile-field {
+-  padding: 16px;
++.bean-body {
++  fill: transparent;
++  stroke: var(--c);
++  stroke-width: 1.5;
++  transition: fill 0.2s ease, stroke 0.2s ease;
++}
++
++.bean.is-on .bean-body {
++  fill: var(--c);
++}
++
++.bean-crease {
++  fill: none;
++  stroke: var(--c);
++  stroke-width: 1.7;
++  stroke-linecap: round;
++  transition: stroke 0.2s ease;
++}
++
++.bean.is-on .bean-crease {
++  stroke: var(--porcelain);
++}
++
++.beans-sm .bean {
++  width: 16px;
++  height: 16px;
++}
++
++.beans-md .bean {
++  width: 20px;
++  height: 20px;
++}
++
++.beans-lg {
++  gap: 4px;
++}
++
++.beans-lg .bean {
++  width: 44px;
++  height: 44px;
++}
++
++.beans.is-input .bean {
++  cursor: pointer;
++  border-radius: 12px;
++  transition: transform 0.15s var(--ease-spring);
++}
++
++.beans.is-input .bean:active {
++  transform: scale(0.88);
++}
++
++/* Filling beans roll in left to right after a tap. */
++.beans[data-pop='a'] .bean.is-on {
++  animation: bean-pop-a 0.46s var(--ease-out) backwards;
++  animation-delay: calc(var(--i) * 45ms);
++}
++
++.beans[data-pop='b'] .bean.is-on {
++  animation: bean-pop-b 0.46s var(--ease-out) backwards;
++  animation-delay: calc(var(--i) * 45ms);
+ }
+ 
+-.profile-field label {
++/* Buttons ---------------------------------------------------------------------- */
++
++.btn {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  gap: 8px;
++  min-height: 48px;
++  padding: 0 22px;
++  border: 0;
++  border-radius: 999px;
++  font-size: 15px;
++  font-weight: 650;
++  line-height: 1;
++  text-decoration: none;
++  white-space: nowrap;
++  transition: transform 0.15s var(--ease-spring), background-color 0.2s ease, box-shadow 0.2s ease,
++    opacity 0.2s ease;
++}
++
++.btn svg {
++  width: 18px;
++  height: 18px;
++}
++
++.btn:active:not(:disabled) {
++  transform: scale(0.97);
++}
++
++.btn:disabled {
++  opacity: 0.45;
++  cursor: not-allowed;
++}
++
++.btn-primary {
++  background: var(--cherry);
++  color: #fff;
++  box-shadow: 0 8px 18px -8px rgb(210 48 63 / 0.7);
++}
++
++.btn-primary:hover:not(:disabled) {
++  background: var(--cherry-deep);
++}
++
++.btn-secondary {
++  background: var(--porcelain);
++  box-shadow: inset 0 0 0 1.5px var(--line);
++}
++
++.btn-secondary:hover:not(:disabled) {
++  box-shadow: inset 0 0 0 1.5px var(--soft);
++}
++
++.btn-danger {
++  background: var(--danger);
++  color: #fff;
++}
++
++.btn-quiet-danger {
++  padding: 0 14px;
++  background: none;
++  color: var(--danger);
++}
++
++.btn-quiet-danger:hover:not(:disabled) {
++  background: var(--danger-soft);
++}
++
++.btn-block {
++  width: 100%;
++}
++
++/* Forms ------------------------------------------------------------------------ */
++
++.field {
++  margin-bottom: 18px;
++}
++
++.field label {
+   display: block;
+-  font-family: var(--font-mono);
+-  font-size: 11px;
+-  text-transform: uppercase;
+-  letter-spacing: 0.06em;
+-  color: var(--ink-soft);
+-  margin-bottom: 6px;
++  margin-bottom: 8px;
++  font-size: 14.5px;
++  font-weight: 650;
++}
++
++.field-control {
++  position: relative;
+ }
+ 
+-.profile-field input {
++.field input,
++.field textarea {
+   width: 100%;
+-  border: 1px solid var(--line);
+-  border-radius: var(--radius-sm);
+-  padding: 11px 12px;
+-  background: #fff;
+-  outline: none;
++  min-height: 52px;
++  padding: 0 16px;
++  border: 1.5px solid var(--line);
++  border-radius: var(--r-field);
++  background: var(--porcelain);
++  font-size: 16px;
++  font-weight: 500;
++  outline: 0;
++  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+ }
+ 
+-.profile-field input:focus {
+-  border-color: var(--ink-soft);
++.field textarea {
++  min-height: 96px;
++  padding: 14px 16px;
++  line-height: 1.45;
++  resize: none;
+ }
+ 
+-.install-card {
+-  margin: 8px 16px 0;
++.field input[type='password'],
++.field input[type='text'][name$='assword'] {
++  padding-right: 76px;
++}
++
++.field input:focus,
++.field textarea:focus {
++  border-color: var(--roast);
++  box-shadow: 0 0 0 4px rgb(210 48 63 / 0.16);
++}
++
++.field.has-error input,
++.field.has-error textarea {
++  border-color: var(--danger);
++}
++
++.field.has-error .field-control {
++  animation: shake 0.4s var(--ease-out);
++}
++
++.field-toggle {
++  position: absolute;
++  top: 50%;
++  right: 6px;
++  height: 40px;
++  padding: 0 12px;
++  border: 0;
++  border-radius: 10px;
++  background: none;
++  color: var(--soft);
++  font-size: 14px;
++  font-weight: 650;
++  transform: translateY(-50%);
++}
++
++.field-error {
++  margin-top: 7px;
++  color: var(--danger);
++  font-size: 14px;
++  font-weight: 550;
++}
++
++.field-hint,
++.field-counter {
++  margin-top: 7px;
++  color: var(--soft);
++  font-size: 13.5px;
++}
++
++.field-counter {
++  text-align: right;
++}
++
++.form-error {
++  margin-bottom: 16px;
++  padding: 12px 14px;
++  border-radius: 12px;
++  background: var(--danger-soft);
++  color: var(--danger);
++  font-size: 14.5px;
++  font-weight: 550;
++  animation: fade-in 0.2s ease-out;
++}
++
++.form-error a {
++  color: inherit;
++  text-decoration: underline;
++}
++
++.form-aside {
++  margin: -6px 0 18px;
++  text-align: right;
++  font-size: 14.5px;
++}
++
++.form-aside a {
++  font-weight: 600;
++}
++
++.form-row {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 12px;
++}
++
++.form-saved {
++  display: inline-flex;
++  align-items: center;
++  gap: 6px;
++  min-width: 72px;
++  color: var(--leaf);
++  font-size: 14.5px;
++  font-weight: 650;
++  opacity: 0;
++  transition: opacity 0.2s ease;
++}
++
++.form-saved.is-shown {
++  opacity: 1;
++}
++
++.form-saved svg {
++  width: 18px;
++  height: 18px;
++  animation: check-pop 0.4s var(--ease-spring);
++}
++
++/* Sign in, create account, reset ------------------------------------------------- */
++
++.auth {
++  flex: 1;
++  min-height: 0;
++  overflow-y: auto;
++  padding: calc(24px + var(--safe-top)) 20px calc(32px + var(--safe-bottom));
++}
++
++.auth-hero {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  gap: 4px;
++  padding: 8px 0 22px;
++  color: var(--roast);
++}
++
++.steam-cup {
++  width: 104px;
++  height: auto;
++  overflow: visible;
++}
++
++.cup {
++  transform-origin: 60px 98px;
++  animation: cup-rise 0.8s var(--ease-spring);
++}
++
++.steam path {
++  opacity: 0;
++  stroke-dasharray: 30;
++  animation: steam 3.4s ease-in-out infinite;
++}
++
++.steam .steam-2 {
++  animation-delay: 0.55s;
++}
++
++.steam .steam-3 {
++  animation-delay: 1.1s;
++}
++
++.wordmark {
++  font-size: 36px;
++  font-weight: 800;
++  font-stretch: 78%;
++  letter-spacing: -0.035em;
++  line-height: 1;
++}
++
++.auth-card {
++  padding: 28px 22px 24px;
++  border-radius: var(--r-sheet);
++  background: var(--porcelain);
++  box-shadow: var(--shadow-card);
++}
++
++.auth-card h1 {
++  font-size: 30px;
++  font-weight: 800;
++  font-stretch: 82%;
++  letter-spacing: -0.03em;
++}
++
++.auth-sub {
++  margin: 8px 0 22px;
++  color: var(--soft);
++  max-width: 42ch;
++}
++
++.auth-notice {
++  margin: -8px 0 20px;
++  padding: 11px 14px;
++  border-radius: 12px;
++  background: var(--ceramic);
++  font-size: 14.5px;
++  font-weight: 550;
++}
++
++.auth-foot {
++  margin-top: 22px;
++  color: var(--soft);
++  text-align: center;
++  line-height: 2;
++}
++
++.auth-foot a {
++  color: var(--roast);
++  font-weight: 650;
++}
++
++/* Log, profile, settings ------------------------------------------------------------- */
++
++.stats {
++  display: grid;
++  grid-template-columns: repeat(3, 1fr);
++  margin: 24px 0 28px;
++  padding: 0;
++}
++
++.stats > div {
++  display: flex;
++  flex-direction: column-reverse;
++  gap: 4px;
++  padding-left: 16px;
++  border-left: 1.5px solid var(--line);
++}
++
++.stats > div:first-child {
++  padding-left: 0;
++  border-left: 0;
++}
++
++.stats dt {
++  color: var(--soft);
++  font-size: 14px;
++}
++
++.stats dd {
++  font-size: 38px;
++  font-weight: 800;
++  font-stretch: 78%;
++  font-variant-numeric: tabular-nums;
++  letter-spacing: -0.035em;
++  line-height: 1;
++}
++
++.entry-list {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  padding: 0;
++  list-style: none;
++}
++
++.entry {
++  display: flex;
++  align-items: flex-start;
++  gap: 14px;
+   padding: 16px;
+-  border-radius: var(--radius);
+-  background: var(--stamp-soft);
+-  border: 1px solid var(--stamp);
++  border-radius: var(--r-card);
++  background: var(--porcelain);
++  box-shadow: var(--shadow-card);
+ }
+ 
+-.install-card h3 {
+-  font-size: 15px;
+-  color: var(--stamp);
+-  margin-bottom: 6px;
++.entry-main {
++  flex: 1;
++  min-width: 0;
+ }
+ 
+-.install-card p {
+-  font-size: 13px;
+-  color: #2c453d;
++.entry h2,
++.entry h3 {
++  font-size: 19px;
++  font-weight: 750;
++  font-stretch: 90%;
++  letter-spacing: -0.015em;
++  overflow-wrap: anywhere;
++}
++
++.entry-address {
++  margin-top: 3px;
++  overflow: hidden;
++  color: var(--soft);
++  font-size: 14px;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++
++.entry-meta {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 4px 12px;
++  margin-top: 10px;
++  color: var(--soft);
++  font-size: 13.5px;
+ }
+ 
+-.install-card .steps {
++.entry-note {
++  display: -webkit-box;
+   margin-top: 10px;
++  overflow: hidden;
++  font-size: 15px;
++  line-height: 1.5;
++  -webkit-box-orient: vertical;
++  -webkit-line-clamp: 4;
++}
++
++.entry-skeleton {
++  height: 96px;
++  border-radius: var(--r-card);
++}
++
++.empty-state {
++  padding: 26px 22px;
++  border-radius: var(--r-card);
++  background: var(--porcelain);
++  box-shadow: var(--shadow-card);
++}
++
++.empty-state h2,
++.empty-state h3 {
++  font-size: 21px;
++}
++
++.empty-state p {
++  margin: 8px 0 18px;
++  color: var(--soft);
++}
++
++.empty-state h3:last-child {
++  margin-bottom: 0;
++}
++
++.profile-head {
+   display: flex;
+-  flex-direction: column;
+-  gap: 6px;
+-  font-size: 13px;
++  align-items: center;
++  gap: 16px;
+ }
+ 
+-.install-card .steps span.k {
+-  font-family: var(--font-mono);
+-  font-weight: 500;
+-  margin-right: 4px;
++.profile-id {
++  min-width: 0;
+ }
+ 
+-.loading-state,
+-.error-state {
++.profile-id h1 {
++  font-size: 36px;
++  font-weight: 800;
++  font-stretch: 78%;
++  letter-spacing: -0.035em;
++  line-height: 1;
++  overflow-wrap: anywhere;
++}
++
++.profile-handle {
++  margin-top: 4px;
++  color: var(--soft);
++}
++
++.profile-bio {
++  max-width: 52ch;
++  margin-top: 18px;
++  line-height: 1.5;
++  overflow-wrap: anywhere;
++}
++
++.profile-joined {
++  margin-top: 8px;
++  color: var(--soft);
++  font-size: 14px;
++}
++
++.profile-actions {
++  margin-top: 16px;
++}
++
++.avatar {
++  display: inline-grid;
++  flex-shrink: 0;
++  place-items: center;
++  border-radius: 50%;
++  color: #fff;
++  font-weight: 700;
++  line-height: 1;
++}
++
++.tone-0 {
++  background: var(--bean);
++}
++.tone-1 {
++  background: var(--leaf);
++}
++.tone-2 {
++  background: var(--cherry);
++}
++.tone-3 {
++  background: var(--roast);
++}
++.tone-4 {
++  background: #2d6a78;
++}
++.tone-5 {
++  background: #8f610f;
++}
++
++.settings-section {
++  padding: 24px 0 8px;
++  border-top: 1.5px solid var(--line);
++}
++
++.page-head + .settings-section {
++  padding-top: 4px;
++  border-top: 0;
++}
++
++.settings-section h2 {
++  margin-bottom: 16px;
++  font-size: 21px;
++}
++
++.install-card {
++  padding: 18px;
++  border-radius: var(--r-card);
++  background: var(--leaf-soft);
++  color: #1f4d37;
++}
++
++.install-card ol {
++  margin-top: 12px;
++  padding-left: 20px;
++  line-height: 1.7;
++}
++
++.account-actions {
+   display: flex;
++  flex-wrap: wrap;
+   align-items: center;
++  gap: 12px;
++  padding-bottom: 12px;
++}
++
++.danger-form {
++  width: 100%;
++  padding: 18px;
++  border-radius: var(--r-card);
++  background: var(--danger-soft);
++}
++
++.danger-form > p {
++  margin-bottom: 16px;
++  line-height: 1.5;
++}
++
++/* Loading and empty-screen states --------------------------------------------------- */
++
++.page-loader {
++  flex: 1;
++  display: grid;
++  place-items: center;
++}
++
++.spinner {
++  width: 28px;
++  height: 28px;
++  border: 3px solid var(--line);
++  border-top-color: var(--roast);
++  border-radius: 50%;
++  animation: spin 0.8s linear infinite;
++}
++
++.skeleton {
++  display: block;
++  border-radius: 10px;
++  background: linear-gradient(100deg, #dde2da 30%, #eef1ec 50%, #dde2da 70%);
++  background-size: 220% 100%;
++  animation: shimmer 1.4s linear infinite;
++}
++
++.error-state {
++  flex: 1;
++  display: flex;
++  flex-direction: column;
++  align-items: flex-start;
+   justify-content: center;
+-  height: 100%;
+-  color: var(--ink-soft);
+-  font-size: 13.5px;
+-  text-align: center;
+-  padding: 0 32px;
++  gap: 12px;
++  padding: calc(32px + var(--safe-top)) 28px calc(var(--dock-space) + 24px);
++}
++
++.error-state h1 {
++  font-size: 34px;
++  font-weight: 800;
++  font-stretch: 80%;
++  letter-spacing: -0.03em;
++}
++
++.error-state p {
++  max-width: 38ch;
++  color: var(--soft);
++  line-height: 1.5;
++}
++
++.error-state .btn {
++  margin-top: 6px;
++}
++
++/* Keyframes -------------------------------------------------------------------------- */
++
++@keyframes fade-in {
++  from {
++    opacity: 0;
++  }
++}
++
++@keyframes fade-out {
++  to {
++    opacity: 0;
++  }
++}
++
++@keyframes sheet-in {
++  from {
++    transform: translateY(36%);
++    opacity: 0;
++  }
++}
++
++@keyframes sheet-out {
++  to {
++    transform: translateY(100%);
++    opacity: 0;
++  }
++}
++
++@keyframes bean-pop-a {
++  0% {
++    transform: scale(0.55) rotate(-24deg);
++  }
++  60% {
++    transform: scale(1.22) rotate(6deg);
++  }
++  100% {
++    transform: scale(1) rotate(0);
++  }
++}
++
++@keyframes bean-pop-b {
++  0% {
++    transform: scale(0.55) rotate(-24deg);
++  }
++  60% {
++    transform: scale(1.22) rotate(6deg);
++  }
++  100% {
++    transform: scale(1) rotate(0);
++  }
++}
++
++@keyframes check-pop {
++  0% {
++    transform: scale(0.4);
++    opacity: 0;
++  }
++  100% {
++    transform: scale(1);
++    opacity: 1;
++  }
++}
++
++@keyframes stamp-press {
++  0% {
++    transform: scale(1.9) rotate(-22deg);
++    opacity: 0;
++  }
++  55% {
++    transform: scale(0.92) rotate(-6deg);
++    opacity: 1;
++  }
++  78% {
++    transform: scale(1.04) rotate(-9deg);
++  }
++  100% {
++    transform: scale(1) rotate(-8deg);
++  }
++}
++
++@keyframes stamp-ripple {
++  from {
++    transform: scale(0.8);
++    opacity: 0.5;
++  }
++  to {
++    transform: scale(1.55);
++    opacity: 0;
++  }
++}
++
++@keyframes shake {
++  20% {
++    transform: translateX(-6px);
++  }
++  45% {
++    transform: translateX(5px);
++  }
++  70% {
++    transform: translateX(-3px);
++  }
++  100% {
++    transform: translateX(0);
++  }
++}
++
++@keyframes cup-rise {
++  from {
++    transform: translateY(14px) scale(0.94);
++    opacity: 0;
++  }
++}
++
++@keyframes steam {
++  0% {
++    opacity: 0;
++    stroke-dashoffset: 30;
++    transform: translateY(8px);
++  }
++  30% {
++    opacity: 0.85;
++  }
++  100% {
++    opacity: 0;
++    stroke-dashoffset: 0;
++    transform: translateY(-10px);
++  }
++}
++
++@keyframes shimmer {
++  from {
++    background-position: 120% 0;
++  }
++  to {
++    background-position: -120% 0;
++  }
++}
++
++@keyframes spin {
++  to {
++    transform: rotate(360deg);
++  }
++}
++
++/* Respect "reduce motion": no movement, no loops. The spinner keeps turning
++   (slowly) because it signals that something is loading. */
++@media (prefers-reduced-motion: reduce) {
++  *,
++  *::before,
++  *::after {
++    animation-duration: 0.01ms !important;
++    animation-delay: 0s !important;
++    animation-iteration-count: 1 !important;
++    transition-duration: 0.01ms !important;
++    scroll-behavior: auto !important;
++  }
++
++  .spinner {
++    animation-duration: 1.6s !important;
++    animation-iteration-count: infinite !important;
++  }
++
++  .steam path {
++    animation: none;
++    opacity: 0.5;
++  }
++
++  .skeleton {
++    animation: none;
++  }
+ }
+diff --git a/src/lib/api.js b/src/lib/api.js
+index a6fffd2..a5f4f72 100644
+--- a/src/lib/api.js
++++ b/src/lib/api.js
+@@ -1,36 +1,62 @@
+-import { getDeviceId } from './user.js'
+-
+-async function request(path, options = {}) {
+-  const res = await fetch(`/api${path}`, {
+-    ...options,
+-    headers: {
+-      'Content-Type': 'application/json',
+-      'x-device-id': getDeviceId(),
+-      ...options.headers
+-    }
+-  })
++// Thin fetch wrapper. Sessions live in an httpOnly cookie the browser sends
++// automatically, so there is nothing to attach here.
++
++export class ApiError extends Error {
++  constructor(message, { status = 0, field, code } = {}) {
++    super(message)
++    this.name = 'ApiError'
++    this.status = status
++    this.field = field // which form field the message is about, when the server says
++    this.code = code
++  }
++}
+ 
+-  if (!res.ok) {
+-    const body = await res.json().catch(() => ({}))
+-    throw new Error(body.error || `Request failed (${res.status})`)
++async function request(method, path, data) {
++  let res
++  try {
++    res = await fetch(`/api${path}`, {
++      method,
++      headers: data !== undefined ? { 'Content-Type': 'application/json' } : undefined,
++      body: data !== undefined ? JSON.stringify(data) : undefined
++    })
++  } catch {
++    throw new ApiError('Can’t reach CaféFinds. Check your connection and try again.')
+   }
+ 
+   if (res.status === 204) return null
+-  return res.json()
++  const body = await res.json().catch(() => ({}))
++  if (!res.ok) {
++    throw new ApiError(body.error || 'Something went wrong. Try again.', {
++      status: res.status,
++      field: body.field,
++      code: body.code
++    })
++  }
++  return body
+ }
+ 
+ export const api = {
+-  me: () => request('/me'),
+-  updateName: (name) => request('/me', { method: 'PATCH', body: JSON.stringify({ name }) }),
+-
+-  upsertCafe: (cafe) => request('/cafes/upsert', { method: 'POST', body: JSON.stringify(cafe) }),
+-  getCafe: (placeId) => request(`/cafes/${placeId}`),
+-
+-  toggleVisit: (cafeId) => request('/visits/toggle', { method: 'POST', body: JSON.stringify({ cafeId }) }),
+-
+-  upsertReview: (cafeId, rating, text) =>
+-    request('/reviews', { method: 'POST', body: JSON.stringify({ cafeId, rating, text }) }),
+-  deleteReview: (cafeId) => request(`/reviews/${cafeId}`, { method: 'DELETE' }),
+-
+-  getLog: () => request('/log')
++  // account
++  session: () => request('GET', '/auth/me'),
++  register: (fields) => request('POST', '/auth/register', fields),
++  login: (identifier, password) => request('POST', '/auth/login', { identifier, password }),
++  logout: () => request('POST', '/auth/logout'),
++  forgotPassword: (email) => request('POST', '/auth/forgot', { email }),
++  resetPassword: (token, password) => request('POST', '/auth/reset', { token, password }),
++
++  // settings
++  updateProfile: (fields) => request('PATCH', '/me', fields),
++  changePassword: (currentPassword, newPassword) => request('POST', '/me/password', { currentPassword, newPassword }),
++  deleteAccount: (password) => request('DELETE', '/me', { password }),
++
++  // people
++  getProfile: (username) => request('GET', `/users/${encodeURIComponent(username)}`),
++
++  // cafes (reading is public; everything below `getCafe` needs an account)
++  getCafe: (placeId) => request('GET', `/cafes/${encodeURIComponent(placeId)}`),
++  upsertCafe: (cafe) => request('POST', '/cafes/upsert', cafe),
++  toggleVisit: (cafeId) => request('POST', '/visits/toggle', { cafeId }),
++  upsertReview: (cafeId, rating, text) => request('POST', '/reviews', { cafeId, rating, text }),
++  deleteReview: (cafeId) => request('DELETE', `/reviews/${cafeId}`),
++  getLog: () => request('GET', '/log')
+ }
+diff --git a/src/lib/auth.jsx b/src/lib/auth.jsx
+new file mode 100644
+index 0000000..28655ab
+--- /dev/null
++++ b/src/lib/auth.jsx
+@@ -0,0 +1,49 @@
++import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
++import { api } from './api.js'
++import { clearLegacyDeviceId, legacyDeviceId } from './user.js'
++
++const AuthContext = createContext(null)
++
++// `user` is undefined while we check for a session, null for guests, and the
++// user object once signed in. Guests can browse; anything that writes needs a user.
++export function AuthProvider({ children }) {
++  const [user, setUser] = useState(undefined)
++
++  useEffect(() => {
++    let cancelled = false
++    api
++      .session()
++      .then(({ user }) => !cancelled && setUser(user))
++      .catch(() => !cancelled && setUser(null))
++    return () => {
++      cancelled = true
++    }
++  }, [])
++
++  const login = useCallback(async (identifier, password) => {
++    const { user } = await api.login(identifier, password)
++    setUser(user)
++    return user
++  }, [])
++
++  const register = useCallback(async (fields) => {
++    const { user } = await api.register({ ...fields, deviceId: legacyDeviceId() })
++    clearLegacyDeviceId()
++    setUser(user)
++    return user
++  }, [])
++
++  const logout = useCallback(async () => {
++    await api.logout().catch(() => {})
++    setUser(null)
++  }, [])
++
++  const value = useMemo(() => ({ user, setUser, login, register, logout }), [user, login, register, logout])
++  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
++}
++
++export function useAuth() {
++  const ctx = useContext(AuthContext)
++  if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>')
++  return ctx
++}
+diff --git a/src/lib/format.js b/src/lib/format.js
+new file mode 100644
+index 0000000..d31640b
+--- /dev/null
++++ b/src/lib/format.js
+@@ -0,0 +1,41 @@
++export function formatDate(iso) {
++  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
++}
++
++const UNITS = [
++  ['year', 31536000],
++  ['month', 2592000],
++  ['week', 604800],
++  ['day', 86400],
++  ['hour', 3600],
++  ['minute', 60]
++]
++
++export function timeAgo(iso) {
++  const diff = (new Date(iso).getTime() - Date.now()) / 1000
++  const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
++  for (const [unit, seconds] of UNITS) {
++    if (Math.abs(diff) >= seconds) return rtf.format(Math.round(diff / seconds), unit)
++  }
++  return 'just now'
++}
++
++export function initials(name = '') {
++  return (
++    name
++      .trim()
++      .split(/\s+/)
++      .slice(0, 2)
++      .map((part) => part[0]?.toUpperCase() ?? '')
++      .join('') || '?'
++  )
++}
++
++// A stable 0–5 so each person always gets the same avatar color.
++export function toneFor(key = '') {
++  let h = 0
++  for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) >>> 0
++  return h % 6
++}
++
++export const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+diff --git a/src/lib/motion.js b/src/lib/motion.js
+new file mode 100644
+index 0000000..498f4c0
+--- /dev/null
++++ b/src/lib/motion.js
+@@ -0,0 +1,30 @@
++import { useEffect, useState } from 'react'
++
++export function prefersReducedMotion() {
++  return typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)
++}
++
++// Counts up from 0 to `target` with an ease-out. Jumps straight to the final
++// value for anyone who has asked their device to reduce motion.
++export function useCountUp(target, { duration = 800, decimals = 0 } = {}) {
++  const [value, setValue] = useState(prefersReducedMotion() ? target : 0)
++
++  useEffect(() => {
++    if (typeof target !== 'number' || Number.isNaN(target)) return
++    if (prefersReducedMotion()) {
++      setValue(target)
++      return
++    }
++    let frame
++    const start = performance.now()
++    const tick = (now) => {
++      const t = Math.min(1, (now - start) / duration)
++      setValue(target * (1 - Math.pow(1 - t, 3)))
++      if (t < 1) frame = requestAnimationFrame(tick)
++    }
++    frame = requestAnimationFrame(tick)
++    return () => cancelAnimationFrame(frame)
++  }, [target, duration])
++
++  return Number(value).toFixed(decimals)
++}
+diff --git a/src/lib/user.js b/src/lib/user.js
+index 489ec35..ba2927c 100644
+--- a/src/lib/user.js
++++ b/src/lib/user.js
+@@ -1,14 +1,22 @@
++// Before accounts existed, each device got a random id so its visited list
++// and reviews could persist. That id is no longer used to sign in; it is only
++// sent once, when someone registers, so the server can move their old log into
++// their new account.
++
+ const KEY = 'caféfinds:deviceId'
+ 
+-// No sign-up flow yet — each device gets a stable anonymous id so reviews
+-// and the visited checklist persist across sessions. Swap this out for real
+-// auth (e.g. Clerk, Auth.js) later without touching the schema much: the
+-// User model just needs a second lookup field.
+-export function getDeviceId() {
+-  let id = localStorage.getItem(KEY)
+-  if (!id) {
+-    id = crypto.randomUUID()
+-    localStorage.setItem(KEY, id)
++export function legacyDeviceId() {
++  try {
++    return localStorage.getItem(KEY) || undefined
++  } catch {
++    return undefined
++  }
++}
++
++export function clearLegacyDeviceId() {
++  try {
++    localStorage.removeItem(KEY)
++  } catch {
++    // storage unavailable (private mode); nothing to clear
+   }
+-  return id
+ }
+diff --git a/src/pages/ForgotPasswordPage.jsx b/src/pages/ForgotPasswordPage.jsx
+new file mode 100644
+index 0000000..8001fe9
+--- /dev/null
++++ b/src/pages/ForgotPasswordPage.jsx
+@@ -0,0 +1,72 @@
++import { useState } from 'react'
++import { Link } from 'react-router-dom'
++import AuthShell from '../components/AuthShell.jsx'
++import Field from '../components/Field.jsx'
++import { api } from '../lib/api.js'
++
++export default function ForgotPasswordPage() {
++  const [email, setEmail] = useState('')
++  const [error, setError] = useState('')
++  const [busy, setBusy] = useState(false)
++  const [sent, setSent] = useState(false)
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setError('')
++    try {
++      await api.forgotPassword(email)
++      setSent(true)
++    } catch (err) {
++      setError(err.message)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  if (sent) {
++    return (
++      <AuthShell
++        title="Check your email"
++        subtitle={`If an account uses ${email.trim()}, a link to reset your password is on its way. It works for one hour.`}
++        footer={<Link to="/login">Back to sign in</Link>}
++      >
++        <button type="button" className="btn btn-secondary btn-block" onClick={() => setSent(false)}>
++          Use a different email
++        </button>
++      </AuthShell>
++    )
++  }
++
++  return (
++    <AuthShell
++      title="Reset your password"
++      subtitle="Enter your email and we’ll send you a link to choose a new password."
++      footer={<Link to="/login">Back to sign in</Link>}
++    >
++      <form onSubmit={submit} noValidate>
++        <Field
++          label="Email"
++          name="email"
++          type="email"
++          inputMode="email"
++          autoComplete="email"
++          autoCapitalize="none"
++          autoCorrect="off"
++          spellCheck={false}
++          value={email}
++          onChange={(e) => setEmail(e.target.value)}
++          required
++        />
++        {error && (
++          <p className="form-error" role="alert">
++            {error}
++          </p>
++        )}
++        <button className="btn btn-primary btn-block" disabled={busy || !email}>
++          {busy ? 'Sending…' : 'Send reset link'}
++        </button>
++      </form>
++    </AuthShell>
++  )
++}
+diff --git a/src/pages/LogPage.jsx b/src/pages/LogPage.jsx
+index e74d91c..69252e6 100644
+--- a/src/pages/LogPage.jsx
++++ b/src/pages/LogPage.jsx
+@@ -1,77 +1,96 @@
+ import { useEffect, useState } from 'react'
+-import { api } from '../lib/api.js'
++import { Link } from 'react-router-dom'
++import BeanRating from '../components/BeanRating.jsx'
+ import StampBadge from '../components/StampBadge.jsx'
+-import StarRating from '../components/StarRating.jsx'
+-
+-function formatDate(iso) {
+-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+-}
++import Stats from '../components/Stats.jsx'
++import { api } from '../lib/api.js'
++import { formatDate } from '../lib/format.js'
+ 
++// The diary: every café you've marked visited, newest first.
+ export default function LogPage() {
+   const [entries, setEntries] = useState(null)
++  const [error, setError] = useState('')
++  const [attempt, setAttempt] = useState(0)
+ 
+   useEffect(() => {
+-    api.getLog().then((res) => setEntries(res.entries))
+-  }, [])
++    setError('')
++    api
++      .getLog()
++      .then((res) => setEntries(res.entries))
++      .catch((err) => setError(err.message))
++  }, [attempt])
++
++  if (error) {
++    return (
++      <div className="error-state">
++        <h1>Your log didn’t load</h1>
++        <p>{error}</p>
++        <button className="btn btn-secondary" onClick={() => setAttempt((n) => n + 1)}>
++          Try again
++        </button>
++      </div>
++    )
++  }
+ 
+   if (entries === null) {
+-    return <div className="loading-state">Loading your log…</div>
++    return (
++      <div className="page">
++        <header className="page-head">
++          <span className="skeleton" style={{ width: 160, height: 34 }} />
++        </header>
++        <div className="entry-list">
++          {[0, 1, 2].map((i) => (
++            <span key={i} className="skeleton entry-skeleton" />
++          ))}
++        </div>
++      </div>
++    )
+   }
+ 
+   const reviewed = entries.filter((e) => e.review)
+   const avg = reviewed.length
+     ? Math.round((reviewed.reduce((a, e) => a + e.review.rating, 0) / reviewed.length) * 10) / 10
+-    : '—'
++    : null
+ 
+   return (
+     <div className="page">
+-      <div className="top-bar">
+-        <div>
+-          <p className="eyebrow">Your log</p>
+-          <h1>Been there</h1>
+-        </div>
+-      </div>
++      <header className="page-head">
++        <h1>Your log</h1>
++      </header>
+ 
+-      <div className="stat-row">
+-        <div className="stat-card">
+-          <div className="num">{entries.length}</div>
+-          <div className="label">Visited</div>
+-        </div>
+-        <div className="stat-card">
+-          <div className="num">{reviewed.length}</div>
+-          <div className="label">Reviewed</div>
+-        </div>
+-        <div className="stat-card">
+-          <div className="num">{avg}</div>
+-          <div className="label">Avg rating</div>
+-        </div>
+-      </div>
++      <Stats
++        items={[
++          { label: 'Visited', value: entries.length },
++          { label: 'Rated', value: reviewed.length },
++          { label: 'Average', value: avg, decimals: 1 }
++        ]}
++      />
+ 
+       {entries.length === 0 ? (
+-        <div className="log-empty">
+-          <h3>Nothing stamped yet</h3>
+-          <p>Find a coffee shop on the map and mark it as visited to start your log.</p>
++        <div className="empty-state">
++          <h2>Nothing in your log yet</h2>
++          <p>Open a café on the map and mark it visited to start your log.</p>
++          <Link to="/" className="btn btn-primary">
++            Find a café
++          </Link>
+         </div>
+       ) : (
+-        <div className="log-list">
++        <ul className="entry-list">
+           {entries.map((e) => (
+-            <div className="log-entry" key={e.cafeId}>
+-              <StampBadge />
+-              <div className="log-entry-main">
+-                <h3>{e.name}</h3>
+-                <div className="log-entry-meta">
+-                  <span>{formatDate(e.visitedAt)}</span>
+-                  {e.review && (
+-                    <>
+-                      <span>·</span>
+-                      <StarRating value={e.review.rating} readOnly />
+-                    </>
+-                  )}
++            <li className="entry" key={e.cafeId}>
++              <StampBadge size={44} />
++              <div className="entry-main">
++                <h2>{e.name}</h2>
++                {e.address && <p className="entry-address">{e.address}</p>}
++                <div className="entry-meta">
++                  {e.review && <BeanRating value={e.review.rating} readOnly size="sm" />}
++                  <time dateTime={e.visitedAt}>{formatDate(e.visitedAt)}</time>
+                 </div>
++                {e.review?.text && <p className="entry-note">{e.review.text}</p>}
+               </div>
+-            </div>
++            </li>
+           ))}
+-        </div>
++        </ul>
+       )}
+     </div>
+   )
+diff --git a/src/pages/LoginPage.jsx b/src/pages/LoginPage.jsx
+new file mode 100644
+index 0000000..1bd747c
+--- /dev/null
++++ b/src/pages/LoginPage.jsx
+@@ -0,0 +1,84 @@
++import { useState } from 'react'
++import { Link, useLocation } from 'react-router-dom'
++import AuthShell from '../components/AuthShell.jsx'
++import Field from '../components/Field.jsx'
++import { useAuth } from '../lib/auth.jsx'
++
++export default function LoginPage() {
++  const { login } = useAuth()
++  const location = useLocation()
++  const [identifier, setIdentifier] = useState('')
++  const [password, setPassword] = useState('')
++  const [error, setError] = useState('')
++  const [busy, setBusy] = useState(false)
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setError('')
++    try {
++      await login(identifier, password) // GuestOnly then sends them on to where they were headed
++    } catch (err) {
++      setError(err.message)
++      setBusy(false)
++    }
++  }
++
++  const carry = location.state?.from ? { from: location.state.from } : undefined
++
++  return (
++    <AuthShell
++      title="Sign in"
++      subtitle="Pick up your log where you left it."
++      notice={location.state?.reason}
++      footer={
++        <>
++          New here?{' '}
++          <Link to="/register" state={carry}>
++            Create an account
++          </Link>
++          <br />
++          <Link to="/">Keep browsing as a guest</Link>
++        </>
++      }
++    >
++      <form onSubmit={submit} noValidate>
++        <Field
++          label="Email or username"
++          name="identifier"
++          autoComplete="username"
++          autoCapitalize="none"
++          autoCorrect="off"
++          spellCheck={false}
++          enterKeyHint="next"
++          value={identifier}
++          onChange={(e) => setIdentifier(e.target.value)}
++          required
++        />
++        <Field
++          label="Password"
++          name="password"
++          type="password"
++          autoComplete="current-password"
++          enterKeyHint="go"
++          value={password}
++          onChange={(e) => setPassword(e.target.value)}
++          required
++        />
++        <p className="form-aside">
++          <Link to="/forgot-password">Forgot your password?</Link>
++        </p>
++
++        {error && (
++          <p className="form-error" role="alert">
++            {error}
++          </p>
++        )}
++
++        <button className="btn btn-primary btn-block" disabled={busy || !identifier || !password}>
++          {busy ? 'Signing in…' : 'Sign in'}
++        </button>
++      </form>
++    </AuthShell>
++  )
++}
+diff --git a/src/pages/MapPage.jsx b/src/pages/MapPage.jsx
+index f1832da..e2ec176 100644
+--- a/src/pages/MapPage.jsx
++++ b/src/pages/MapPage.jsx
+@@ -1,90 +1,132 @@
+ import { useCallback, useEffect, useRef, useState } from 'react'
+ import { useGoogleMaps } from '../hooks/useGoogleMaps.js'
+ import { api } from '../lib/api.js'
++import { useAuth } from '../lib/auth.jsx'
++import CafeSheet from '../components/CafeSheet.jsx'
++import { LocateIcon } from '../components/icons.jsx'
+ import MapView from '../components/MapView.jsx'
++import { PageLoader } from '../components/RouteGuards.jsx'
+ import SearchBar from '../components/SearchBar.jsx'
+-import CafeSheet from '../components/CafeSheet.jsx'
+ 
++// What a café looks like before anyone has logged it: just the Google place.
++const emptyCafe = (place) => ({
++  id: null,
++  placeId: place.placeId,
++  name: place.name,
++  address: place.address ?? null,
++  lat: place.lat,
++  lng: place.lng,
++  avgRating: null,
++  reviewCount: 0,
++  visited: false,
++  myReview: null,
++  reviews: []
++})
++
++// Anyone can open a café and read its logs. Marking visited and rating are
++// for signed-in people; the sheet shows a sign-in prompt to everyone else.
+ export default function MapPage() {
+   const { google, isLoaded, error } = useGoogleMaps()
++  const { user } = useAuth()
+   const mapViewRef = useRef(null)
++  const openToken = useRef(0)
+   const [visitedIds, setVisitedIds] = useState(new Set())
+   const [selectedCafe, setSelectedCafe] = useState(null)
+-  const [sheetLoading, setSheetLoading] = useState(false)
+ 
+   useEffect(() => {
++    if (!user) {
++      setVisitedIds(new Set())
++      return
++    }
++    let cancelled = false
+     api
+       .getLog()
+-      .then(({ entries }) => setVisitedIds(new Set(entries.map((e) => e.placeId))))
++      .then(({ entries }) => !cancelled && setVisitedIds(new Set(entries.map((e) => e.placeId))))
+       .catch(() => {})
+-  }, [])
++    return () => {
++      cancelled = true
++    }
++  }, [user?.id])
+ 
+-  const openCafe = useCallback(async (placeSummary) => {
+-    setSheetLoading(true)
++  const openCafe = useCallback(async (place) => {
++    const token = ++openToken.current
++    // Open at once with what Google gave us; the logs fill in when they arrive.
++    setSelectedCafe({ ...emptyCafe(place), loading: true })
+     try {
+-      const cafe = await api.upsertCafe(placeSummary)
+-      setSelectedCafe(cafe)
++      const cafe = await api.getCafe(place.placeId)
++      if (token === openToken.current) setSelectedCafe(cafe)
+     } catch (err) {
+-      console.error(err)
+-    } finally {
+-      setSheetLoading(false)
++      if (token !== openToken.current) return
++      setSelectedCafe(emptyCafe(place)) // 404 just means nobody has logged it yet
++      if (err.status !== 404) console.error(err)
+     }
+   }, [])
+ 
++  // Cafés are only saved to our database once a signed-in person acts on them.
++  async function ensureCafe() {
++    if (selectedCafe.id) return selectedCafe
++    const { placeId, name, address, lat, lng } = selectedCafe
++    return api.upsertCafe({ placeId, name, address, lat, lng })
++  }
++
++  const patchSelected = (placeId, patch) =>
++    setSelectedCafe((c) => (c && c.placeId === placeId ? (typeof patch === 'function' ? patch(c) : { ...c, ...patch }) : c))
++
+   async function handleToggleVisit() {
+-    if (!selectedCafe) return
+-    const { visited } = await api.toggleVisit(selectedCafe.id)
+-    setSelectedCafe((c) => ({ ...c, visited }))
++    const cafe = await ensureCafe()
++    const { visited } = await api.toggleVisit(cafe.id)
++    patchSelected(cafe.placeId, { id: cafe.id, visited })
+     setVisitedIds((prev) => {
+       const next = new Set(prev)
+-      visited ? next.add(selectedCafe.placeId) : next.delete(selectedCafe.placeId)
++      visited ? next.add(cafe.placeId) : next.delete(cafe.placeId)
+       return next
+     })
++    return visited
+   }
+ 
+   async function handleSubmitReview(rating, text) {
+-    if (!selectedCafe) return
+-    await api.upsertReview(selectedCafe.id, rating, text)
+-    const refreshed = await api.getCafe(selectedCafe.placeId)
+-    setSelectedCafe(refreshed)
+-    setVisitedIds((prev) => new Set(prev).add(selectedCafe.placeId))
++    const cafe = await ensureCafe()
++    await api.upsertReview(cafe.id, rating, text)
++    const refreshed = await api.getCafe(cafe.placeId)
++    patchSelected(cafe.placeId, () => refreshed)
++    setVisitedIds((prev) => new Set(prev).add(cafe.placeId))
+   }
+ 
+   async function handleDeleteReview() {
+-    if (!selectedCafe) return
+-    await api.deleteReview(selectedCafe.id)
+-    const refreshed = await api.getCafe(selectedCafe.placeId)
+-    setSelectedCafe(refreshed)
++    if (!selectedCafe?.id) return
++    const { id, placeId } = selectedCafe
++    await api.deleteReview(id)
++    const refreshed = await api.getCafe(placeId)
++    patchSelected(placeId, () => refreshed)
+   }
+ 
+   if (error) {
+     return (
+       <div className="error-state">
+-        Couldn't load Google Maps. Check that VITE_GOOGLE_MAPS_API_KEY is set and the Maps
+-        JavaScript API + Places API are enabled for it.
++        <h1>The map didn’t load</h1>
++        <p>
++          Check that <code>VITE_GOOGLE_MAPS_API_KEY</code> is set and that the Maps JavaScript API and Places API are
++          turned on for it.
++        </p>
+       </div>
+     )
+   }
+ 
+-  if (!isLoaded) {
+-    return <div className="loading-state">Loading map…</div>
+-  }
++  if (!isLoaded) return <PageLoader />
+ 
+   return (
+     <div className="app-main">
+       <SearchBar google={google} map={mapViewRef.current} onPlaceSelected={openCafe} />
+       <MapView ref={mapViewRef} google={google} visitedIds={visitedIds} onCafeClick={openCafe} />
+ 
+-      <button className="locate-btn" onClick={() => mapViewRef.current?.panToUser()} aria-label="Find my location">
+-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+-          <circle cx="12" cy="12" r="3" />
+-          <path d="M12 2v3M12 19v3M2 12h3M19 12h3" strokeLinecap="round" />
+-        </svg>
++      <button className="locate-btn" onClick={() => mapViewRef.current?.panToUser()} aria-label="Go to my location">
++        <LocateIcon />
+       </button>
+ 
+-      {selectedCafe && !sheetLoading && (
++      {selectedCafe && (
+         <CafeSheet
+           cafe={selectedCafe}
++          user={user || null}
+           onClose={() => setSelectedCafe(null)}
+           onToggleVisit={handleToggleVisit}
+           onSubmitReview={handleSubmitReview}
+diff --git a/src/pages/ProfilePage.jsx b/src/pages/ProfilePage.jsx
+index 4fa79d2..f5c554c 100644
+--- a/src/pages/ProfilePage.jsx
++++ b/src/pages/ProfilePage.jsx
+@@ -1,62 +1,129 @@
+ import { useEffect, useState } from 'react'
++import { Link, useParams } from 'react-router-dom'
++import Avatar from '../components/Avatar.jsx'
++import BeanRating from '../components/BeanRating.jsx'
++import { GearIcon } from '../components/icons.jsx'
++import Stats from '../components/Stats.jsx'
+ import { api } from '../lib/api.js'
++import { useAuth } from '../lib/auth.jsx'
++import { formatDate } from '../lib/format.js'
+ 
+-function isStandalone() {
+-  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true
+-}
+-
++// Anyone can view a profile (/u/<username>): name, bio, stats and ratings.
++// Visits without a rating stay private; only the visited count is shown.
+ export default function ProfilePage() {
+-  const [name, setName] = useState('')
+-  const [saved, setSaved] = useState(true)
+-  const installed = isStandalone()
++  const { username } = useParams()
++  const { user: me } = useAuth()
++  const [state, setState] = useState({ status: 'loading' })
+ 
+   useEffect(() => {
+-    api.me().then(({ user }) => setName(user.name))
+-  }, [])
++    let cancelled = false
++    setState({ status: 'loading' })
++    api
++      .getProfile(username)
++      .then((data) => !cancelled && setState({ status: 'ready', data }))
++      .catch((err) => !cancelled && setState({ status: err.status === 404 ? 'missing' : 'error', message: err.message }))
++    return () => {
++      cancelled = true
++    }
++  }, [username, me?.id])
+ 
+-  useEffect(() => {
+-    if (saved) return
+-    const t = setTimeout(() => {
+-      api.updateName(name).then(() => setSaved(true))
+-    }, 500)
+-    return () => clearTimeout(t)
+-  }, [name, saved])
++  if (state.status === 'loading') {
++    return (
++      <div className="page">
++        <div className="profile-head">
++          <span className="skeleton" style={{ width: 72, height: 72, borderRadius: '50%' }} />
++          <span className="skeleton" style={{ width: 160, height: 30 }} />
++        </div>
++      </div>
++    )
++  }
++
++  if (state.status === 'missing') {
++    return (
++      <div className="error-state">
++        <h1>No one here by that name</h1>
++        <p>There’s no profile for @{username}. They may have changed their username.</p>
++        <Link to="/" className="btn btn-secondary">
++          Back to the map
++        </Link>
++      </div>
++    )
++  }
++
++  if (state.status === 'error') {
++    return (
++      <div className="error-state">
++        <h1>This profile didn’t load</h1>
++        <p>{state.message}</p>
++      </div>
++    )
++  }
++
++  const { user, isMe, stats, reviews } = state.data
+ 
+   return (
+     <div className="page">
+-      <div className="top-bar">
+-        <div>
+-          <p className="eyebrow">Profile</p>
+-          <h1>You</h1>
++      <header className="profile-head">
++        <Avatar name={user.name} username={user.username} size={72} />
++        <div className="profile-id">
++          <h1>{user.name}</h1>
++          <p className="profile-handle">@{user.username}</p>
+         </div>
+-      </div>
++      </header>
+ 
+-      <div className="profile-field">
+-        <label htmlFor="name">Display name</label>
+-        <input
+-          id="name"
+-          value={name}
+-          onChange={(e) => {
+-            setName(e.target.value)
+-            setSaved(false)
+-          }}
+-          maxLength={40}
+-          placeholder="Your name"
+-        />
+-      </div>
++      {user.bio && <p className="profile-bio">{user.bio}</p>}
++      <p className="profile-joined">Joined {new Date(user.joinedAt).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</p>
+ 
+-      {!installed && (
+-        <div className="install-card">
+-          <h3>Add CaféFinds to your Home Screen</h3>
+-          <p>The app isn't in the App Store yet — install it straight from Safari instead. It'll open full-screen, just like a native app.</p>
+-          <div className="steps">
+-            <div><span className="k">1</span>Open this page in Safari on your iPhone.</div>
+-            <div><span className="k">2</span>Tap the Share icon in the toolbar.</div>
+-            <div><span className="k">3</span>Scroll down and tap "Add to Home Screen".</div>
+-            <div><span className="k">4</span>Tap "Add" — CaféFinds now lives on your Home Screen.</div>
+-          </div>
++      {isMe && (
++        <div className="profile-actions">
++          <Link to="/settings" className="btn btn-secondary">
++            <GearIcon /> Settings
++          </Link>
+         </div>
+       )}
++
++      <Stats
++        items={[
++          { label: 'Visited', value: stats.visited },
++          { label: 'Rated', value: stats.reviewed },
++          { label: 'Average', value: stats.avgRating, decimals: 1 }
++        ]}
++      />
++
++      <section aria-labelledby="profile-logs">
++        <h2 id="profile-logs" className="section-title">
++          Logs
++        </h2>
++        {reviews.length === 0 ? (
++          <div className="empty-state">
++            <h3>{isMe ? 'You haven’t rated a café yet' : `${user.name} hasn’t rated a café yet`}</h3>
++            {isMe && (
++              <>
++                <p>Open a café on the map and add your rating.</p>
++                <Link to="/" className="btn btn-primary">
++                  Find a café
++                </Link>
++              </>
++            )}
++          </div>
++        ) : (
++          <ul className="entry-list">
++            {reviews.map((r) => (
++              <li className="entry entry-plain" key={r.id}>
++                <div className="entry-main">
++                  <h3>{r.cafe.name}</h3>
++                  {r.cafe.address && <p className="entry-address">{r.cafe.address}</p>}
++                  <div className="entry-meta">
++                    <BeanRating value={r.rating} readOnly size="sm" />
++                    <time dateTime={r.createdAt}>{formatDate(r.createdAt)}</time>
++                  </div>
++                  {r.text && <p className="entry-note">{r.text}</p>}
++                </div>
++              </li>
++            ))}
++          </ul>
++        )}
++      </section>
+     </div>
+   )
+ }
+diff --git a/src/pages/RegisterPage.jsx b/src/pages/RegisterPage.jsx
+new file mode 100644
+index 0000000..437dadd
+--- /dev/null
++++ b/src/pages/RegisterPage.jsx
+@@ -0,0 +1,102 @@
++import { useState } from 'react'
++import { Link, useLocation } from 'react-router-dom'
++import AuthShell from '../components/AuthShell.jsx'
++import Field from '../components/Field.jsx'
++import { useAuth } from '../lib/auth.jsx'
++
++export default function RegisterPage() {
++  const { register } = useAuth()
++  const location = useLocation()
++  const [values, setValues] = useState({ email: '', username: '', password: '' })
++  const [errors, setErrors] = useState({})
++  const [formError, setFormError] = useState('')
++  const [busy, setBusy] = useState(false)
++
++  const set = (key) => (e) => {
++    setValues((v) => ({ ...v, [key]: e.target.value }))
++    if (errors[key]) setErrors((prev) => ({ ...prev, [key]: undefined }))
++  }
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setErrors({})
++    setFormError('')
++    try {
++      await register(values) // GuestOnly then sends them on
++    } catch (err) {
++      if (err.field) setErrors({ [err.field]: err.message })
++      else setFormError(err.message)
++      setBusy(false)
++    }
++  }
++
++  const carry = location.state?.from ? { from: location.state.from } : undefined
++
++  return (
++    <AuthShell
++      title="Create your account"
++      subtitle="Log the cafés you visit and rate what you drank."
++      footer={
++        <>
++          Already have an account?{' '}
++          <Link to="/login" state={carry}>
++            Sign in
++          </Link>
++        </>
++      }
++    >
++      <form onSubmit={submit} noValidate>
++        <Field
++          label="Email"
++          name="email"
++          type="email"
++          inputMode="email"
++          autoComplete="email"
++          autoCapitalize="none"
++          autoCorrect="off"
++          spellCheck={false}
++          value={values.email}
++          onChange={set('email')}
++          error={errors.email}
++          required
++        />
++        <Field
++          label="Username"
++          name="username"
++          autoComplete="username"
++          autoCapitalize="none"
++          autoCorrect="off"
++          spellCheck={false}
++          maxLength={20}
++          hint="3–20 letters, numbers or underscores. This is your profile link."
++          value={values.username}
++          onChange={set('username')}
++          error={errors.username}
++          required
++        />
++        <Field
++          label="Password"
++          name="password"
++          type="password"
++          autoComplete="new-password"
++          hint="At least 8 characters."
++          value={values.password}
++          onChange={set('password')}
++          error={errors.password}
++          required
++        />
++
++        {formError && (
++          <p className="form-error" role="alert">
++            {formError}
++          </p>
++        )}
++
++        <button className="btn btn-primary btn-block" disabled={busy || !values.email || !values.username || !values.password}>
++          {busy ? 'Creating account…' : 'Create account'}
++        </button>
++      </form>
++    </AuthShell>
++  )
++}
+diff --git a/src/pages/ResetPasswordPage.jsx b/src/pages/ResetPasswordPage.jsx
+new file mode 100644
+index 0000000..b721184
+--- /dev/null
++++ b/src/pages/ResetPasswordPage.jsx
+@@ -0,0 +1,80 @@
++import { useState } from 'react'
++import { Link, useNavigate, useSearchParams } from 'react-router-dom'
++import AuthShell from '../components/AuthShell.jsx'
++import Field from '../components/Field.jsx'
++import { api } from '../lib/api.js'
++import { useAuth } from '../lib/auth.jsx'
++
++export default function ResetPasswordPage() {
++  const [params] = useSearchParams()
++  const token = params.get('token') || ''
++  const { setUser } = useAuth()
++  const navigate = useNavigate()
++  const [password, setPassword] = useState('')
++  const [error, setError] = useState('')
++  const [fieldError, setFieldError] = useState('')
++  const [busy, setBusy] = useState(false)
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setError('')
++    setFieldError('')
++    try {
++      const { user } = await api.resetPassword(token, password)
++      setUser(user) // the reset signs them in
++      navigate('/', { replace: true })
++    } catch (err) {
++      if (err.field === 'password') setFieldError(err.message)
++      else setError(err.message)
++      setBusy(false)
++    }
++  }
++
++  if (!token) {
++    return (
++      <AuthShell
++        title="This link isn’t complete"
++        subtitle="Open the link from your reset email again, or request a new one."
++        footer={<Link to="/login">Back to sign in</Link>}
++      >
++        <Link to="/forgot-password" className="btn btn-primary btn-block">
++          Request a new link
++        </Link>
++      </AuthShell>
++    )
++  }
++
++  return (
++    <AuthShell
++      title="Choose a new password"
++      subtitle="You’ll be signed in as soon as it’s saved."
++      footer={<Link to="/login">Back to sign in</Link>}
++    >
++      <form onSubmit={submit} noValidate>
++        <Field
++          label="New password"
++          name="password"
++          type="password"
++          autoComplete="new-password"
++          hint="At least 8 characters."
++          value={password}
++          onChange={(e) => {
++            setPassword(e.target.value)
++            setFieldError('')
++          }}
++          error={fieldError}
++          required
++        />
++        {error && (
++          <p className="form-error" role="alert">
++            {error} <Link to="/forgot-password">Request a new link</Link>
++          </p>
++        )}
++        <button className="btn btn-primary btn-block" disabled={busy || !password}>
++          {busy ? 'Saving…' : 'Save password'}
++        </button>
++      </form>
++    </AuthShell>
++  )
++}
+diff --git a/src/pages/SettingsPage.jsx b/src/pages/SettingsPage.jsx
+new file mode 100644
+index 0000000..6512fe8
+--- /dev/null
++++ b/src/pages/SettingsPage.jsx
+@@ -0,0 +1,366 @@
++import { useEffect, useState } from 'react'
++import { Link, useNavigate } from 'react-router-dom'
++import Field from '../components/Field.jsx'
++import { BackIcon, CheckIcon } from '../components/icons.jsx'
++import { api } from '../lib/api.js'
++import { useAuth } from '../lib/auth.jsx'
++
++function isStandalone() {
++  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true
++}
++
++// Shows "Saved" for a moment after a successful save.
++function useSaved() {
++  const [saved, setSaved] = useState(false)
++  useEffect(() => {
++    if (!saved) return
++    const t = setTimeout(() => setSaved(false), 2600)
++    return () => clearTimeout(t)
++  }, [saved])
++  return [saved, setSaved]
++}
++
++function Saved({ show }) {
++  return (
++    <p className={`form-saved${show ? ' is-shown' : ''}`} role="status">
++      {show && (
++        <>
++          <CheckIcon /> Saved
++        </>
++      )}
++    </p>
++  )
++}
++
++function ProfileForm({ user, setUser }) {
++  const [values, setValues] = useState({ name: user.name, username: user.username, bio: user.bio ?? '' })
++  const [errors, setErrors] = useState({})
++  const [formError, setFormError] = useState('')
++  const [busy, setBusy] = useState(false)
++  const [saved, setSaved] = useSaved()
++
++  const dirty = values.name !== user.name || values.username !== user.username || values.bio !== (user.bio ?? '')
++  const set = (key) => (e) => {
++    setValues((v) => ({ ...v, [key]: e.target.value }))
++    setErrors((prev) => ({ ...prev, [key]: undefined }))
++  }
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setErrors({})
++    setFormError('')
++    try {
++      const { user: updated } = await api.updateProfile(values)
++      setUser(updated)
++      setValues({ name: updated.name, username: updated.username, bio: updated.bio ?? '' })
++      setSaved(true)
++    } catch (err) {
++      if (err.field) setErrors({ [err.field]: err.message })
++      else setFormError(err.message)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  return (
++    <form onSubmit={submit} noValidate>
++      <Field label="Display name" name="name" maxLength={40} autoComplete="name" value={values.name} onChange={set('name')} error={errors.name} />
++      <Field
++        label="Username"
++        name="username"
++        maxLength={20}
++        autoCapitalize="none"
++        autoCorrect="off"
++        spellCheck={false}
++        hint={`Your profile is at /u/${values.username.trim().toLowerCase() || 'username'}`}
++        value={values.username}
++        onChange={set('username')}
++        error={errors.username}
++      />
++      <Field
++        label="Bio"
++        name="bio"
++        multiline
++        rows={3}
++        maxLength={160}
++        placeholder="Your usual order, your favorite roaster…"
++        value={values.bio}
++        onChange={set('bio')}
++        counter={`${values.bio.length}/160`}
++      />
++      {formError && (
++        <p className="form-error" role="alert">
++          {formError}
++        </p>
++      )}
++      <div className="form-row">
++        <button className="btn btn-primary" disabled={!dirty || busy}>
++          {busy ? 'Saving…' : 'Save changes'}
++        </button>
++        <Saved show={saved} />
++      </div>
++    </form>
++  )
++}
++
++function EmailForm({ user, setUser }) {
++  const [email, setEmail] = useState(user.email)
++  const [currentPassword, setCurrentPassword] = useState('')
++  const [errors, setErrors] = useState({})
++  const [formError, setFormError] = useState('')
++  const [busy, setBusy] = useState(false)
++  const [saved, setSaved] = useSaved()
++
++  const changed = email.trim().toLowerCase() !== user.email
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setErrors({})
++    setFormError('')
++    try {
++      const { user: updated } = await api.updateProfile({ email, currentPassword })
++      setUser(updated)
++      setEmail(updated.email)
++      setCurrentPassword('')
++      setSaved(true)
++    } catch (err) {
++      if (err.field) setErrors({ [err.field]: err.message })
++      else setFormError(err.message)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  return (
++    <form onSubmit={submit} noValidate>
++      <Field
++        label="Email"
++        name="email"
++        type="email"
++        inputMode="email"
++        autoComplete="email"
++        autoCapitalize="none"
++        spellCheck={false}
++        value={email}
++        onChange={(e) => {
++          setEmail(e.target.value)
++          setErrors({})
++        }}
++        error={errors.email}
++      />
++      {changed && (
++        <Field
++          label="Current password"
++          name="currentPassword"
++          type="password"
++          autoComplete="current-password"
++          hint="We ask for this when you change your email."
++          value={currentPassword}
++          onChange={(e) => {
++            setCurrentPassword(e.target.value)
++            setErrors({})
++          }}
++          error={errors.currentPassword}
++        />
++      )}
++      {formError && (
++        <p className="form-error" role="alert">
++          {formError}
++        </p>
++      )}
++      <div className="form-row">
++        <button className="btn btn-primary" disabled={!changed || !currentPassword || busy}>
++          {busy ? 'Saving…' : 'Update email'}
++        </button>
++        <Saved show={saved} />
++      </div>
++    </form>
++  )
++}
++
++function PasswordForm({ setUser }) {
++  const [current, setCurrent] = useState('')
++  const [next, setNext] = useState('')
++  const [errors, setErrors] = useState({})
++  const [formError, setFormError] = useState('')
++  const [busy, setBusy] = useState(false)
++  const [saved, setSaved] = useSaved()
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setErrors({})
++    setFormError('')
++    try {
++      const { user: updated } = await api.changePassword(current, next)
++      setUser(updated)
++      setCurrent('')
++      setNext('')
++      setSaved(true)
++    } catch (err) {
++      if (err.field) setErrors({ [err.field]: err.message })
++      else setFormError(err.message)
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  return (
++    <form onSubmit={submit} noValidate>
++      <Field
++        label="Current password"
++        name="currentPassword"
++        type="password"
++        autoComplete="current-password"
++        value={current}
++        onChange={(e) => {
++          setCurrent(e.target.value)
++          setErrors({})
++        }}
++        error={errors.currentPassword}
++      />
++      <Field
++        label="New password"
++        name="newPassword"
++        type="password"
++        autoComplete="new-password"
++        hint="At least 8 characters. Other devices are signed out when you change it."
++        value={next}
++        onChange={(e) => {
++          setNext(e.target.value)
++          setErrors({})
++        }}
++        error={errors.newPassword}
++      />
++      {formError && (
++        <p className="form-error" role="alert">
++          {formError}
++        </p>
++      )}
++      <div className="form-row">
++        <button className="btn btn-primary" disabled={!current || !next || busy}>
++          {busy ? 'Saving…' : 'Update password'}
++        </button>
++        <Saved show={saved} />
++      </div>
++    </form>
++  )
++}
++
++function DeleteAccount({ setUser }) {
++  const navigate = useNavigate()
++  const [open, setOpen] = useState(false)
++  const [password, setPassword] = useState('')
++  const [error, setError] = useState('')
++  const [busy, setBusy] = useState(false)
++
++  async function submit(e) {
++    e.preventDefault()
++    setBusy(true)
++    setError('')
++    try {
++      await api.deleteAccount(password)
++      setUser(null)
++      navigate('/', { replace: true })
++    } catch (err) {
++      setError(err.message)
++      setBusy(false)
++    }
++  }
++
++  if (!open) {
++    return (
++      <button type="button" className="btn btn-quiet-danger" onClick={() => setOpen(true)}>
++        Delete account
++      </button>
++    )
++  }
++
++  return (
++    <form className="danger-form" onSubmit={submit} noValidate>
++      <p>This permanently deletes your account, your visited list and every rating you’ve left. It can’t be undone.</p>
++      <Field
++        label="Confirm with your password"
++        name="password"
++        type="password"
++        autoComplete="current-password"
++        value={password}
++        onChange={(e) => {
++          setPassword(e.target.value)
++          setError('')
++        }}
++        error={error}
++      />
++      <div className="form-row">
++        <button className="btn btn-danger" disabled={!password || busy}>
++          {busy ? 'Deleting…' : 'Delete my account'}
++        </button>
++        <button type="button" className="btn btn-secondary" onClick={() => setOpen(false)}>
++          Cancel
++        </button>
++      </div>
++    </form>
++  )
++}
++
++export default function SettingsPage() {
++  const { user, setUser, logout } = useAuth()
++  const navigate = useNavigate()
++
++  async function signOut() {
++    await logout()
++    navigate('/', { replace: true })
++  }
++
++  return (
++    <div className="page">
++      <header className="page-head">
++        <Link to={`/u/${user.username}`} className="back-link">
++          <BackIcon /> Profile
++        </Link>
++        <h1>Settings</h1>
++      </header>
++
++      <section className="settings-section" aria-labelledby="s-profile">
++        <h2 id="s-profile">Profile</h2>
++        <ProfileForm user={user} setUser={setUser} />
++      </section>
++
++      <section className="settings-section" aria-labelledby="s-email">
++        <h2 id="s-email">Email</h2>
++        <EmailForm user={user} setUser={setUser} />
++      </section>
++
++      <section className="settings-section" aria-labelledby="s-password">
++        <h2 id="s-password">Password</h2>
++        <PasswordForm setUser={setUser} />
++      </section>
++
++      {!isStandalone() && (
++        <section className="settings-section" aria-labelledby="s-install">
++          <h2 id="s-install">Add to your Home Screen</h2>
++          <div className="install-card">
++            <p>CaféFinds isn’t in the App Store. Install it from Safari and it opens full-screen like any other app.</p>
++            <ol>
++              <li>Open this page in Safari on your iPhone.</li>
++              <li>Tap the Share button in the toolbar.</li>
++              <li>Choose “Add to Home Screen”, then tap Add.</li>
++            </ol>
++          </div>
++        </section>
++      )}
++
++      <section className="settings-section" aria-labelledby="s-account">
++        <h2 id="s-account">Account</h2>
++        <div className="account-actions">
++          <button type="button" className="btn btn-secondary" onClick={signOut}>
++            Sign out
++          </button>
++          <DeleteAccount setUser={setUser} />
++        </div>
++      </section>
++    </div>
++  )
++}
+diff --git a/vercel.json b/vercel.json
+index bb4fb46..2541abd 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -3,6 +3,7 @@
+   "outputDirectory": "dist",
+   "framework": "vite",
+   "rewrites": [
+-    { "source": "/api/(.*)", "destination": "/api" }
++    { "source": "/api/(.*)", "destination": "/api" },
++    { "source": "/((?!api/).*)", "destination": "/index.html" }
+   ]
+ }
+diff --git a/vite.config.js b/vite.config.js
+index 4c207c3..8269a13 100644
+--- a/vite.config.js
++++ b/vite.config.js
+@@ -12,8 +12,8 @@ export default defineConfig({
+         name: 'CaféFinds — a coffee shop log',
+         short_name: 'CaféFinds',
+         description: 'Track the coffee shops you have been to, rate them, and find the next one on the map.',
+-        theme_color: '#1F1B16',
+-        background_color: '#F7F3EC',
++        theme_color: '#EBEEE9',
++        background_color: '#EBEEE9',
+         display: 'standalone',
+         orientation: 'portrait',
+         start_url: '/',
+-- 
+2.43.0
+

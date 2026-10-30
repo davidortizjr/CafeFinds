@@ -1,7 +1,10 @@
 import { Router } from 'express'
 import { prisma } from '../lib/prisma.js'
+import { requireAuth } from '../lib/auth.js'
 
 const router = Router()
+
+router.use(requireAuth)
 
 // Toggle the checklist state for a cafe. Idempotent create/delete pair
 // keyed on the (userId, cafeId) unique constraint.

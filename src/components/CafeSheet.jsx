@@ -1,118 +1,236 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { prefersReducedMotion } from '../lib/motion.js'
+import { plural, timeAgo } from '../lib/format.js'
+import Avatar from './Avatar.jsx'
+import BeanRating from './BeanRating.jsx'
+import { CheckIcon, PlusIcon } from './icons.jsx'
 import StampBadge from './StampBadge.jsx'
-import StarRating from './StarRating.jsx'
 
-export default function CafeSheet({ cafe, onClose, onToggleVisit, onSubmitReview, onDeleteReview }) {
+const CLOSE_MS = 200
+
+export default function CafeSheet({ cafe, user, onClose, onToggleVisit, onSubmitReview, onDeleteReview }) {
   const [rating, setRating] = useState(cafe.myReview?.rating ?? 0)
   const [text, setText] = useState(cafe.myReview?.text ?? '')
-  const [saving, setSaving] = useState(false)
+  const [busy, setBusy] = useState('') // 'visit' | 'save' | 'delete' | ''
+  const [error, setError] = useState('')
+  const [stamped, setStamped] = useState(false) // true once this person marks it visited here
+  const [closing, setClosing] = useState(false)
 
+  const sheetRef = useRef(null)
+  const drag = useRef(null)
+
+  // Start from the person's saved log whenever a different café opens or the saved log changes.
   useEffect(() => {
     setRating(cafe.myReview?.rating ?? 0)
     setText(cafe.myReview?.text ?? '')
-  }, [cafe.id, cafe.myReview])
+    setError('')
+  }, [cafe.placeId, cafe.myReview])
 
-  async function handleSubmit() {
-    if (!rating) return
-    setSaving(true)
+  useEffect(() => setStamped(false), [cafe.placeId])
+
+  useEffect(() => {
+    sheetRef.current?.focus()
+  }, [cafe.placeId])
+
+  function close() {
+    if (closing) return
+    if (prefersReducedMotion()) return onClose()
+    setClosing(true)
+    setTimeout(onClose, CLOSE_MS)
+  }
+
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && close()
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  // Swipe down on the handle to dismiss; a short pull springs back.
+  function onGrabDown(e) {
+    if (e.button !== undefined && e.button !== 0) return
+    drag.current = { startY: e.clientY, startT: performance.now(), dy: 0 }
+    e.currentTarget.setPointerCapture(e.pointerId)
+    sheetRef.current.style.transition = 'none'
+  }
+  function onGrabMove(e) {
+    if (!drag.current) return
+    drag.current.dy = Math.max(0, e.clientY - drag.current.startY)
+    sheetRef.current.style.transform = `translateY(${drag.current.dy}px)`
+  }
+  function onGrabUp() {
+    const d = drag.current
+    if (!d) return
+    drag.current = null
+    const el = sheetRef.current
+    el.style.transition = ''
+    const velocity = d.dy / Math.max(1, performance.now() - d.startT)
+    if (d.dy > 110 || velocity > 0.7) close()
+    else el.style.transform = ''
+  }
+
+  async function run(kind, action) {
+    setBusy(kind)
+    setError('')
     try {
-      await onSubmitReview(rating, text.trim())
+      await action()
+    } catch (err) {
+      setError(err.message)
     } finally {
-      setSaving(false)
+      setBusy('')
     }
   }
 
+  const toggleVisit = () =>
+    run('visit', async () => {
+      const nowVisited = await onToggleVisit()
+      setStamped(nowVisited)
+    })
+  const saveLog = () => run('save', () => onSubmitReview(rating, text.trim()))
+  const deleteLog = () => run('delete', onDeleteReview)
+
+  const loading = Boolean(cafe.loading)
+  const disabled = loading || Boolean(busy)
+
   return (
     <>
-      <div className="sheet-backdrop" onClick={onClose} />
-      <div className="sheet" role="dialog" aria-label={cafe.name}>
-        <div className="sheet-handle" />
+      <div className={`sheet-backdrop${closing ? ' is-closing' : ''}`} onClick={close} />
+      <div
+        ref={sheetRef}
+        className={`sheet${closing ? ' is-closing' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={cafe.name}
+        tabIndex={-1}
+      >
+        <div
+          className="sheet-grab"
+          onPointerDown={onGrabDown}
+          onPointerMove={onGrabMove}
+          onPointerUp={onGrabUp}
+          onPointerCancel={onGrabUp}
+        >
+          <span className="sheet-handle" />
+        </div>
+
         <div className="sheet-body">
-          <div className="sheet-header">
-            <div>
+          <header className="sheet-header">
+            <div className="sheet-title">
               <h2>{cafe.name}</h2>
               {cafe.address && <p className="sheet-address">{cafe.address}</p>}
-              <div className="sheet-meta">
-                {cafe.avgRating ? (
-                  <>
-                    <StarRating value={Math.round(cafe.avgRating)} readOnly />
-                    <span>
-                      {cafe.avgRating} · {cafe.reviewCount} log{cafe.reviewCount === 1 ? '' : 's'}
-                    </span>
-                  </>
-                ) : (
-                  <span>No logs yet — be the first</span>
-                )}
-              </div>
             </div>
-            {cafe.visited && <StampBadge size={48} />}
-          </div>
+            {cafe.visited && <StampBadge size={56} press={stamped} />}
+          </header>
 
-          <div className="divider" />
-
-          <button
-            type="button"
-            className={`visit-toggle${cafe.visited ? ' is-visited' : ''}`}
-            onClick={onToggleVisit}
-          >
-            {cafe.visited ? (
+          <div className="sheet-rating">
+            {loading ? (
+              <span className="skeleton" style={{ width: 150, height: 20 }} />
+            ) : cafe.avgRating ? (
               <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-                Been here
+                <span className="sheet-score">{cafe.avgRating.toFixed(1)}</span>
+                <BeanRating value={Math.round(cafe.avgRating)} readOnly />
+                <span className="sheet-count">{plural(cafe.reviewCount, 'log')}</span>
               </>
             ) : (
-              <>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-                  <circle cx="12" cy="12" r="9" />
-                </svg>
-                Mark as visited
-              </>
+              <span className="sheet-count">No logs yet. Be the first.</span>
             )}
-          </button>
+          </div>
 
-          <div className="divider" />
-
-          <div className="review-form">
-            <label className="eyebrow">Your log</label>
-            <div style={{ marginTop: 8 }}>
-              <StarRating value={rating} onChange={setRating} />
-            </div>
-            <textarea
-              placeholder="Tasting notes, what you'd order again…"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              maxLength={500}
-            />
-            <button className="btn-primary" disabled={!rating || saving} onClick={handleSubmit}>
-              {saving ? 'Saving…' : cafe.myReview ? 'Update log' : 'Save log'}
-            </button>
-            {cafe.myReview && (
-              <button className="btn-text" onClick={onDeleteReview}>
-                Delete my log
+          {user ? (
+            <>
+              <button
+                type="button"
+                className={`visit-toggle${cafe.visited ? ' is-visited' : ''}`}
+                onClick={toggleVisit}
+                disabled={disabled}
+                aria-pressed={cafe.visited}
+              >
+                {cafe.visited ? <CheckIcon /> : <PlusIcon />}
+                {cafe.visited ? 'Visited' : 'Mark as visited'}
               </button>
-            )}
-          </div>
 
-          <div className="divider" />
-
-          <label className="eyebrow">Other logs</label>
-          <div style={{ marginTop: 8 }}>
-            {cafe.reviews.length === 0 ? (
-              <p className="empty-reviews">Nobody else has logged this one yet.</p>
-            ) : (
-              cafe.reviews.map((r) => (
-                <div className="review-item" key={r.id}>
-                  <div className="review-item-head">
-                    <span className="review-item-name">{r.userName}</span>
-                    <StarRating value={r.rating} readOnly />
-                  </div>
-                  {r.text && <p className="review-item-text">{r.text}</p>}
+              <section className="log-form" aria-labelledby="your-log">
+                <h3 id="your-log">Your log</h3>
+                <BeanRating value={rating} onChange={setRating} size="lg" />
+                <textarea
+                  placeholder="What did you order? How was the room?"
+                  aria-label="Notes about this café"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  maxLength={500}
+                  disabled={disabled}
+                />
+                {error && (
+                  <p className="form-error" role="alert">
+                    {error}
+                  </p>
+                )}
+                <div className="log-actions">
+                  <button type="button" className="btn btn-primary" disabled={!rating || disabled} onClick={saveLog}>
+                    {busy === 'save' ? 'Saving…' : cafe.myReview ? 'Update log' : 'Save log'}
+                  </button>
+                  {cafe.myReview && (
+                    <button type="button" className="btn btn-quiet-danger" disabled={disabled} onClick={deleteLog}>
+                      Delete log
+                    </button>
+                  )}
                 </div>
-              ))
+              </section>
+            </>
+          ) : (
+            <section className="guest-cta" aria-labelledby="guest-cta-title">
+              <p id="guest-cta-title" className="guest-cta-title">
+                Been here?
+              </p>
+              <p className="guest-cta-text">Sign in to mark it visited and add your rating.</p>
+              <div className="guest-cta-actions">
+                <Link to="/login" state={{ from: '/' }} className="btn btn-primary">
+                  Sign in
+                </Link>
+                <Link to="/register" state={{ from: '/' }} className="btn btn-secondary">
+                  Create account
+                </Link>
+              </div>
+            </section>
+          )}
+
+          <section aria-labelledby="recent-logs">
+            <h3 id="recent-logs" className="sheet-section-title">
+              Recent logs
+            </h3>
+            {loading ? (
+              <div className="log-skeletons">
+                <span className="skeleton" style={{ height: 14, width: '60%' }} />
+                <span className="skeleton" style={{ height: 14, width: '85%' }} />
+              </div>
+            ) : cafe.reviews.length === 0 ? (
+              <p className="empty-note">
+                {cafe.myReview ? 'Yours is the only log so far.' : 'No one else has logged this café yet.'}
+              </p>
+            ) : (
+              <ul className="log-items">
+                {cafe.reviews.map((r) => (
+                  <li className="log-item" key={r.id}>
+                    <Avatar name={r.userName} username={r.username} size={36} />
+                    <div className="log-item-main">
+                      <div className="log-item-head">
+                        {r.username ? (
+                          <Link to={`/u/${r.username}`} className="log-item-name">
+                            {r.userName}
+                          </Link>
+                        ) : (
+                          <span className="log-item-name">{r.userName}</span>
+                        )}
+                        <BeanRating value={r.rating} readOnly size="sm" />
+                        <time dateTime={r.createdAt}>{timeAgo(r.createdAt)}</time>
+                      </div>
+                      {r.text && <p className="log-item-text">{r.text}</p>}
+                    </div>
+                  </li>
+                ))}
+              </ul>
             )}
-          </div>
+          </section>
         </div>
       </div>
     </>

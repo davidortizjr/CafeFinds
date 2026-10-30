@@ -1,8 +1,11 @@
 import { useEffect, useRef } from 'react'
+import { SearchIcon } from './icons.jsx'
 
 export default function SearchBar({ google, map, onPlaceSelected }) {
   const inputRef = useRef(null)
   const autocompleteRef = useRef(null)
+  const onPlaceSelectedRef = useRef(onPlaceSelected)
+  onPlaceSelectedRef.current = onPlaceSelected
 
   useEffect(() => {
     if (!google || !inputRef.current || autocompleteRef.current) return
@@ -17,7 +20,7 @@ export default function SearchBar({ google, map, onPlaceSelected }) {
     autocomplete.addListener('place_changed', () => {
       const place = autocomplete.getPlace()
       if (!place.geometry) return
-      onPlaceSelected({
+      onPlaceSelectedRef.current({
         placeId: place.place_id,
         name: place.name,
         address: place.formatted_address,
@@ -29,15 +32,18 @@ export default function SearchBar({ google, map, onPlaceSelected }) {
     })
 
     autocompleteRef.current = autocomplete
-  }, [google, map, onPlaceSelected])
+  }, [google, map])
 
   return (
     <div className="search-bar">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-        <circle cx="11" cy="11" r="7" />
-        <path d="m20 20-3.5-3.5" strokeLinecap="round" />
-      </svg>
-      <input ref={inputRef} type="text" placeholder="Search coffee shops" autoComplete="off" />
+      <SearchIcon />
+      <input
+        ref={inputRef}
+        type="text"
+        placeholder="Search coffee shops"
+        aria-label="Search coffee shops"
+        autoComplete="off"
+      />
     </div>
   )
 }

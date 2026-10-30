@@ -1,14 +1,22 @@
+// Before accounts existed, each device got a random id so its visited list
+// and reviews could persist. That id is no longer used to sign in; it is only
+// sent once, when someone registers, so the server can move their old log into
+// their new account.
+
 const KEY = 'caféfinds:deviceId'
 
-// No sign-up flow yet — each device gets a stable anonymous id so reviews
-// and the visited checklist persist across sessions. Swap this out for real
-// auth (e.g. Clerk, Auth.js) later without touching the schema much: the
-// User model just needs a second lookup field.
-export function getDeviceId() {
-  let id = localStorage.getItem(KEY)
-  if (!id) {
-    id = crypto.randomUUID()
-    localStorage.setItem(KEY, id)
+export function legacyDeviceId() {
+  try {
+    return localStorage.getItem(KEY) || undefined
+  } catch {
+    return undefined
   }
-  return id
+}
+
+export function clearLegacyDeviceId() {
+  try {
+    localStorage.removeItem(KEY)
+  } catch {
+    // storage unavailable (private mode); nothing to clear
+  }
 }

@@ -12,13 +12,36 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
-  deviceId  String   @unique // anonymous id generated on-device, see src/lib/user.js
-  name      String   @default("You")
-  createdAt DateTime @default(now())
+  id           String   @id @default(cuid())
+  // Legacy anonymous id from before accounts existed. New users never get one;
+  // it is only kept so an old device can claim its log when it registers.
+  deviceId     String?  @unique
+  // email/username/passwordHash are null only for those legacy anonymous rows.
+  email        String?  @unique // stored lowercased
+  username     String?  @unique // stored lowercased, 3-20 chars [a-z0-9_]
+  passwordHash String?
+  name         String   @default("You") // display name
+  bio          String?
+  // Bumped on password change/reset so every existing session cookie stops working.
+  tokenVersion Int      @default(0)
+  createdAt    DateTime @default(now())
 
-  reviews Review[]
-  visits  Visit[]
+  reviews        Review[]
+  visits         Visit[]
+  passwordResets PasswordReset[]
+}
+
+model PasswordReset {
+  id        String    @id @default(cuid())
+  tokenHash String    @unique // SHA-256 of the emailed token; the raw token is never stored
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+
+  @@index([userId])
 }
 
 model Cafe {

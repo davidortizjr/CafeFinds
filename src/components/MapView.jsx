@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
+import { prefersReducedMotion } from '../lib/motion.js'
 
 const FALLBACK_CENTER = { lat: 40.7128, lng: -74.006 } // used only if geolocation is denied
 
@@ -22,15 +23,15 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
     }
   }))
 
+  // Roast-brown pins for places you haven't been, leaf green for ones you have.
   function markerIcon(visited) {
-    const fill = visited ? '#2f5d50' : '#1f1b16'
     return {
       path: 'M0,-9 C5,-9 8,-5.5 8,-1.5 C8,3.5 0,10 0,10 C0,10 -8,3.5 -8,-1.5 C-8,-5.5 -5,-9 0,-9 Z',
-      fillColor: fill,
+      fillColor: visited ? '#2f7a55' : '#1c1410',
       fillOpacity: 1,
-      strokeColor: visited ? '#c08a3e' : '#f7f3ec',
-      strokeWeight: visited ? 1.5 : 1,
-      scale: 1.6,
+      strokeColor: '#fafbf8',
+      strokeWeight: 1.6,
+      scale: 1.7,
       anchor: new google.maps.Point(0, 10)
     }
   }
@@ -44,6 +45,11 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
         if (status !== google.maps.places.PlacesServiceStatus.OK || !results) return
 
         const seen = new Set()
+        // Pins drop in one after another the first time the map fills up;
+        // after that they simply appear, so panning stays calm.
+        const dropIn = markersRef.current.size === 0 && !prefersReducedMotion()
+        let dropIndex = 0
+
         results.forEach((place) => {
           if (!place.place_id || !place.geometry) return
           seen.add(place.place_id)
@@ -58,10 +64,16 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
 
           const marker = new google.maps.Marker({
             position: place.geometry.location,
-            map: mapRef.current,
+            map: dropIn ? null : mapRef.current,
             title: place.name,
-            icon: markerIcon(visited)
+            icon: markerIcon(visited),
+            animation: dropIn ? google.maps.Animation.DROP : null
           })
+          if (dropIn) {
+            setTimeout(() => {
+              if (markersRef.current.get(place.place_id) === marker) marker.setMap(mapRef.current)
+            }, dropIndex++ * 45)
+          }
           marker.addListener('click', () => {
             onCafeClick({
               placeId: place.place_id,
@@ -125,16 +137,18 @@ const MapView = forwardRef(function MapView({ google, visitedIds, onCafeClick },
 
 export default MapView
 
-// A quiet, low-contrast map theme so the paper/ink UI stays the focal point
-// rather than default Google Maps blues and greens.
+// A quiet, cool map theme so the pins and the sheet are what you notice.
+// Parks stay faintly visible; businesses and transit are hidden.
 const MAP_STYLE = [
-  { elementType: 'geometry', stylers: [{ color: '#f7f3ec' }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#6b6154' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#f7f3ec' }] },
+  { elementType: 'geometry', stylers: [{ color: '#e8ebe5' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#5e655f' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#eef0ea' }] },
   { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ visibility: 'on' }, { color: '#d9e4d5' }] },
   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#e1d8c4' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#fafbf8' }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#d9ded7' }] },
   { featureType: 'road', elementType: 'labels', stylers: [{ visibility: 'off' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#dfe3df' }] },
-  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#d8cdb4' }] }
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#cddad8' }] },
+  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#d3d9d0' }] }
 ]

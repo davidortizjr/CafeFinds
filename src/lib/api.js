@@ -1,36 +1,62 @@
-import { getDeviceId } from './user.js'
+// Thin fetch wrapper. Sessions live in an httpOnly cookie the browser sends
+// automatically, so there is nothing to attach here.
 
-async function request(path, options = {}) {
-  const res = await fetch(`/api${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      'x-device-id': getDeviceId(),
-      ...options.headers
-    }
-  })
+export class ApiError extends Error {
+  constructor(message, { status = 0, field, code } = {}) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.field = field // which form field the message is about, when the server says
+    this.code = code
+  }
+}
 
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    throw new Error(body.error || `Request failed (${res.status})`)
+async function request(method, path, data) {
+  let res
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      headers: data !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+      body: data !== undefined ? JSON.stringify(data) : undefined
+    })
+  } catch {
+    throw new ApiError('Can’t reach CaféFinds. Check your connection and try again.')
   }
 
   if (res.status === 204) return null
-  return res.json()
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new ApiError(body.error || 'Something went wrong. Try again.', {
+      status: res.status,
+      field: body.field,
+      code: body.code
+    })
+  }
+  return body
 }
 
 export const api = {
-  me: () => request('/me'),
-  updateName: (name) => request('/me', { method: 'PATCH', body: JSON.stringify({ name }) }),
+  // account
+  session: () => request('GET', '/auth/me'),
+  register: (fields) => request('POST', '/auth/register', fields),
+  login: (identifier, password) => request('POST', '/auth/login', { identifier, password }),
+  logout: () => request('POST', '/auth/logout'),
+  forgotPassword: (email) => request('POST', '/auth/forgot', { email }),
+  resetPassword: (token, password) => request('POST', '/auth/reset', { token, password }),
 
-  upsertCafe: (cafe) => request('/cafes/upsert', { method: 'POST', body: JSON.stringify(cafe) }),
-  getCafe: (placeId) => request(`/cafes/${placeId}`),
+  // settings
+  updateProfile: (fields) => request('PATCH', '/me', fields),
+  changePassword: (currentPassword, newPassword) => request('POST', '/me/password', { currentPassword, newPassword }),
+  deleteAccount: (password) => request('DELETE', '/me', { password }),
 
-  toggleVisit: (cafeId) => request('/visits/toggle', { method: 'POST', body: JSON.stringify({ cafeId }) }),
+  // people
+  getProfile: (username) => request('GET', `/users/${encodeURIComponent(username)}`),
 
-  upsertReview: (cafeId, rating, text) =>
-    request('/reviews', { method: 'POST', body: JSON.stringify({ cafeId, rating, text }) }),
-  deleteReview: (cafeId) => request(`/reviews/${cafeId}`, { method: 'DELETE' }),
-
-  getLog: () => request('/log')
+  // cafes (reading is public; everything below `getCafe` needs an account)
+  getCafe: (placeId) => request('GET', `/cafes/${encodeURIComponent(placeId)}`),
+  upsertCafe: (cafe) => request('POST', '/cafes/upsert', cafe),
+  toggleVisit: (cafeId) => request('POST', '/visits/toggle', { cafeId }),
+  upsertReview: (cafeId, rating, text) => request('POST', '/reviews', { cafeId, rating, text }),
+  deleteReview: (cafeId) => request('DELETE', `/reviews/${cafeId}`),
+  getLog: () => request('GET', '/log')
 }

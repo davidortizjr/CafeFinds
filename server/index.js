@@ -1,6 +1,9 @@
 import express from 'express'
 import cors from 'cors'
-import { prisma } from './lib/prisma.js'
+import { attachUser } from './lib/auth.js'
+import authRouter from './routes/auth.js'
+import meRouter from './routes/me.js'
+import usersRouter from './routes/users.js'
 import cafesRouter from './routes/cafes.js'
 import reviewsRouter from './routes/reviews.js'
 import visitsRouter from './routes/visits.js'
@@ -8,43 +11,19 @@ import logRouter from './routes/log.js'
 
 const app = express()
 
+// Behind Vercel's proxy; needed so rate limiting sees the real client IP.
+app.set('trust proxy', 1)
+
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: '20kb' }))
 
-// Every request carries an anonymous device id (generated client-side and
-// stored in localStorage — see src/lib/user.js). We upsert a matching User
-// row and attach it to the request so route handlers never touch prisma
-// user lookups themselves.
-app.use('/api', async (req, res, next) => {
-  try {
-    const deviceId = req.header('x-device-id')
-    if (!deviceId) {
-      return res.status(400).json({ error: 'Missing x-device-id header' })
-    }
-    const user = await prisma.user.upsert({
-      where: { deviceId },
-      update: {},
-      create: { deviceId }
-    })
-    req.user = user
-    next()
-  } catch (err) {
-    next(err)
-  }
-})
+// Reads the session cookie and sets req.user (or null for guests). Routes that
+// need an account add requireAuth; browsing routes work for everyone.
+app.use('/api', attachUser)
 
-app.get('/api/me', (req, res) => res.json({ user: req.user }))
-
-app.patch('/api/me', async (req, res, next) => {
-  try {
-    const name = (req.body.name || '').trim().slice(0, 40)
-    if (!name) return res.status(400).json({ error: 'name is required' })
-    const user = await prisma.user.update({ where: { id: req.user.id }, data: { name } })
-    res.json({ user })
-  } catch (err) {
-    next(err)
-  }
-})
+app.use('/api/auth', authRouter)
+app.use('/api/me', meRouter)
+app.use('/api/users', usersRouter)
 app.use('/api/cafes', cafesRouter)
 app.use('/api/reviews', reviewsRouter)
 app.use('/api/visits', visitsRouter)

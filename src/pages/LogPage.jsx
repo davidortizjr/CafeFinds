@@ -1,77 +1,96 @@
 import { useEffect, useState } from 'react'
-import { api } from '../lib/api.js'
+import { Link } from 'react-router-dom'
+import BeanRating from '../components/BeanRating.jsx'
 import StampBadge from '../components/StampBadge.jsx'
-import StarRating from '../components/StarRating.jsx'
+import Stats from '../components/Stats.jsx'
+import { api } from '../lib/api.js'
+import { formatDate } from '../lib/format.js'
 
-function formatDate(iso) {
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-}
-
+// The diary: every café you've marked visited, newest first.
 export default function LogPage() {
   const [entries, setEntries] = useState(null)
+  const [error, setError] = useState('')
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
-    api.getLog().then((res) => setEntries(res.entries))
-  }, [])
+    setError('')
+    api
+      .getLog()
+      .then((res) => setEntries(res.entries))
+      .catch((err) => setError(err.message))
+  }, [attempt])
+
+  if (error) {
+    return (
+      <div className="error-state">
+        <h1>Your log didn’t load</h1>
+        <p>{error}</p>
+        <button className="btn btn-secondary" onClick={() => setAttempt((n) => n + 1)}>
+          Try again
+        </button>
+      </div>
+    )
+  }
 
   if (entries === null) {
-    return <div className="loading-state">Loading your log…</div>
+    return (
+      <div className="page">
+        <header className="page-head">
+          <span className="skeleton" style={{ width: 160, height: 34 }} />
+        </header>
+        <div className="entry-list">
+          {[0, 1, 2].map((i) => (
+            <span key={i} className="skeleton entry-skeleton" />
+          ))}
+        </div>
+      </div>
+    )
   }
 
   const reviewed = entries.filter((e) => e.review)
   const avg = reviewed.length
     ? Math.round((reviewed.reduce((a, e) => a + e.review.rating, 0) / reviewed.length) * 10) / 10
-    : '—'
+    : null
 
   return (
     <div className="page">
-      <div className="top-bar">
-        <div>
-          <p className="eyebrow">Your log</p>
-          <h1>Been there</h1>
-        </div>
-      </div>
+      <header className="page-head">
+        <h1>Your log</h1>
+      </header>
 
-      <div className="stat-row">
-        <div className="stat-card">
-          <div className="num">{entries.length}</div>
-          <div className="label">Visited</div>
-        </div>
-        <div className="stat-card">
-          <div className="num">{reviewed.length}</div>
-          <div className="label">Reviewed</div>
-        </div>
-        <div className="stat-card">
-          <div className="num">{avg}</div>
-          <div className="label">Avg rating</div>
-        </div>
-      </div>
+      <Stats
+        items={[
+          { label: 'Visited', value: entries.length },
+          { label: 'Rated', value: reviewed.length },
+          { label: 'Average', value: avg, decimals: 1 }
+        ]}
+      />
 
       {entries.length === 0 ? (
-        <div className="log-empty">
-          <h3>Nothing stamped yet</h3>
-          <p>Find a coffee shop on the map and mark it as visited to start your log.</p>
+        <div className="empty-state">
+          <h2>Nothing in your log yet</h2>
+          <p>Open a café on the map and mark it visited to start your log.</p>
+          <Link to="/" className="btn btn-primary">
+            Find a café
+          </Link>
         </div>
       ) : (
-        <div className="log-list">
+        <ul className="entry-list">
           {entries.map((e) => (
-            <div className="log-entry" key={e.cafeId}>
-              <StampBadge />
-              <div className="log-entry-main">
-                <h3>{e.name}</h3>
-                <div className="log-entry-meta">
-                  <span>{formatDate(e.visitedAt)}</span>
-                  {e.review && (
-                    <>
-                      <span>·</span>
-                      <StarRating value={e.review.rating} readOnly />
-                    </>
-                  )}
+            <li className="entry" key={e.cafeId}>
+              <StampBadge size={44} />
+              <div className="entry-main">
+                <h2>{e.name}</h2>
+                {e.address && <p className="entry-address">{e.address}</p>}
+                <div className="entry-meta">
+                  {e.review && <BeanRating value={e.review.rating} readOnly size="sm" />}
+                  <time dateTime={e.visitedAt}>{formatDate(e.visitedAt)}</time>
                 </div>
+                {e.review?.text && <p className="entry-note">{e.review.text}</p>}
               </div>
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
     </div>
   )
